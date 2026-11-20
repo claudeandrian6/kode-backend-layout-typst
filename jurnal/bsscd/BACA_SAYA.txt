@@ -1,3 +1,0 @@
-Taruh logo di sini:
-  logo_jurnal.png   (logo BSSCD, PNG transparan, persegi)
-  logo_penerbit.png (logo IMRECS, PNG transparan)
