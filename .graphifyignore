@@ -1,0 +1,27 @@
+# Build outputs dan data naskah — bukan kode
+kerja/
+unggah/
+jurnal/
+backup_*/
+graphify-out/
+
+# Binary dan media
+bin/
+fonts/
+*.pdf
+*.png
+*.svg
+*.jpg
+*.jpeg
+*.docx
+*.log
+
+# Dependensi
+node_modules/
+venv/
+.venv/
+__pycache__/
+
+# File runtime
+worker.sock
+*.swp

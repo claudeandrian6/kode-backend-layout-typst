@@ -1,0 +1,22 @@
+# Python & Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs & Sockets
+*.log
+*.pid
+*.sock
+
+# Folder Kerja & Upload (abaikan isinya, tapi folder tetap ada)
+kerja/*
+unggah/*
+
+# File Backup & Patch
+backup_*
+*.patch
+
+# Graphify Cache
+graphify-out/
+*.swp

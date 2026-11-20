@@ -1,0 +1,4 @@
+Unggah file font ke folder ini:
+  times.ttf, timesbd.ttf, timesi.ttf, timesbi.ttf  (Times New Roman)
+  cambria.ttc                                    (Cambria Math, untuk persamaan)
+Sumber: C:\Windows\Fonts di komputer Windows Anda.
