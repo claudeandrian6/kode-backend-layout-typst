@@ -214,6 +214,202 @@ class LayoutFixesTest(unittest.TestCase):
             self.assertFalse(any("muncul SESUDAH" in m for m in masalah), masalah)
             self.assertTrue(any("dimulai di hlm 2" in p for p in peringatan), peringatan)
 
+    def test_mundur_sebelum_judul_and_susun_teks_keep_heading_with_paragraph(self):
+        body_dasar = (
+            "#kolom[\n"
+            "#pm(1);First paragraph.\n\n"
+            "]\n"
+            "#tabel(keputusan: \"@K1@\", penuh: true)[\n"
+            "  #table(columns: 2, [A], [B])\n"
+            "]\n"
+            "#kolom[\n"
+            "#celah()\n"
+            "== #pm(2);Section Heading#pe(2)\n"
+            "#pm(3);Paragraph under heading.\n"
+            "]\n"
+        )
+        for jns in ("geser", "tunda"):
+            kp = {1: {"jenis": jns, "target": 3}}
+            rendered = engine.susun_teks(body_dasar, kp)
+            idx_tbl = rendered.find("#tabel(")
+            idx_hdg = rendered.find("== #pm(2);")
+            idx_par = rendered.find("#pm(3);")
+            self.assertGreater(idx_hdg, idx_tbl, (jns, rendered))
+            self.assertGreater(idx_par, idx_hdg, (jns, rendered))
+        self.assertTrue(engine._sebelumnya_judul(body_dasar, 3))
+        self.assertFalse(engine._sebelumnya_judul(body_dasar, 2))
+
+    def test_baris_tunggal_flags_orphan_headings_above_object_and_under_two_lines(self):
+        with tempfile.TemporaryDirectory(dir=BASE, prefix="test-hdg-") as td:
+            pdf1 = Path(td) / "orphan_obj.pdf"
+            with fitz.open() as doc:
+                pg = doc.new_page(width=595.27, height=841.89)
+                for i in range(5):
+                    pg.insert_text((76.535, 111.2 + 11.0 * i), f"Left line {i}", fontname="tiro", fontsize=11)
+                pg.insert_text((305.135, 111.2), "Right prev line", fontname="tiro", fontsize=11)
+                pg.insert_text((305.135, 133.2), "Orphan Heading Above Table", fontname="tibo", fontsize=11)
+                pg.insert_text((76.535, 344.2), "Body under table", fontname="tiro", fontsize=11)
+                pg.insert_text((76.535, 355.2), "Body line 2", fontname="tiro", fontsize=11)
+                doc.save(str(pdf1))
+            teks1 = "#pm(1);Left\n\n== #pm(2);Orphan Heading Above Table#pe(2)\n#pm(3);Body under table"
+            pos1 = {
+                "pm-1": (1, 1, 76.535, 102.4),
+                "pm-2": (2, 1, 305.135, 124.4),
+                "frag-akhir-2-0": (2, 1, 305.135, 124.4),
+                "pm-3": (3, 1, 76.535, 335.4),
+                "objek-info-1": ((1, 163.0), 1, 76.535, 157.4),
+                "objek-akhir-1": ("akhir", 1, 76.535, 320.4),
+            }
+            res1 = engine.baris_tunggal(str(pdf1), pos1, teks1)
+            self.assertTrue(any(d["jenis"] == "judul" and d["hal"] == 1 and d["kol"] == 1 and d["y"] < 200 for d in res1), res1)
+
+            pdf2 = Path(td) / "short_body.pdf"
+            with fitz.open() as doc:
+                pg = doc.new_page(width=595.27, height=841.89)
+                pg.insert_text((76.535, 111.2), "Short Heading", fontname="tibo", fontsize=11)
+                pg.insert_text((76.535, 122.2), "Only one body line", fontname="tiro", fontsize=11)
+                pg.insert_text((305.135, 111.2), "Split continuation line", fontname="tiro", fontsize=11)
+                doc.save(str(pdf2))
+            teks2 = "== #pm(1);Short Heading#pe(1)\n#pm(2);Only one body line"
+            pos2 = {
+                "pm-1": (1, 1, 76.535, 102.4),
+                "frag-akhir-1-0": (1, 1, 76.535, 102.4),
+                "pm-2": (2, 1, 76.535, 113.4),
+                "frag-akhir-2-0": (2, 1, 305.135, 102.4),
+            }
+            res2 = engine.baris_tunggal(str(pdf2), pos2, teks2)
+            self.assertTrue(any(d["jenis"] == "judul" and d["hal"] == 1 and d["kol"] == 0 and d.get("pm") == 1 for d in res2), res2)
+
+    def test_top_floating_table_stays_on_11pt_grid(self):
+        with tempfile.TemporaryDirectory(dir=BASE, prefix="test-flt-grid-") as td:
+            for jns in ("apung", "atas"):
+                body = (
+                    '#import "/template_jurnal.typ": *\n'
+                    "#kolom[\n"
+                    "#pm(1);" + ("Sample word " * 70) + "#pe(1)\n\n"
+                    f'#tabel(jumlah-kolom: 2, penuh: true, di-tempat: true, keputusan: "{jns}", nomor: 1, label: [Table 1.], isi: [Grid check])[\n'
+                    "#table(\n  columns: (200pt, 200pt),\n  [Header A], [Header B],\n  [Cell 1], [Cell 2],\n  [Cell 3], [Cell 4],\n)\n]\n\n"
+                    "== #pm(2);Heading Below Float#pe(2)\n"
+                    "#pm(3);" + ("Following text " * 90) + "#pe(3)\n"
+                    "]\n"
+                )
+                main_typ = Path(td) / f"main_{jns}.typ"
+                body_typ = Path(td) / f"body_{jns}.typ"
+                meta_json = Path(td) / f"meta_{jns}.json"
+                pdf_out = Path(td) / f"out_{jns}.pdf"
+                body_typ.write_text(body, encoding="utf-8")
+                meta_json.write_text(
+                    json.dumps({
+                        "judul": "Test",
+                        "penulis": [{"nama": "A", "afiliasi": "1", "korespondensi": True}],
+                        "afiliasi": ["Inst"],
+                        "email": "a@example.com",
+                        "riwayat": {},
+                        "abstrak": "Abstrak.",
+                        "kata_kunci": ["a", "b"],
+                        "sitasi_penulis": "Author, A.",
+                        "judul_kalimat": "Test",
+                        "header_ganjil": "Author",
+                        "terbitan": {"volume": "5", "nomor": "4", "edisi": "December", "tahun": "2026", "halaman_awal": 1},
+                    }),
+                    encoding="utf-8",
+                )
+                main_typ.write_text(
+                    '#import "/template_jurnal.typ": *\n'
+                    '#let cfg = json("/jurnal/bsscd/config.json")\n'
+                    f'#let meta = json("{meta_json.name}")\n'
+                    '#show: artikel.with(cfg, meta)\n'
+                    f'#include "{body_typ.name}"\n',
+                    encoding="utf-8",
+                )
+                subprocess.run([engine.TYPST, "compile", "--root", str(BASE), str(main_typ), str(pdf_out)], check=True)
+                pos, _ = engine.kueri_posisi(str(main_typ))
+                grid = engine.baris_luar_grid(str(pdf_out), pos, body)
+                self.assertEqual(grid, [], f"keputusan={jns} off-grid: {grid}")
+
+    def test_cari_potong_refines_existing_split_paragraph(self):
+        with tempfile.TemporaryDirectory(dir=BASE, prefix="test-cutref-") as td:
+            pdf = Path(td) / "split.pdf"
+            lines_p1 = (
+                [(76.535, 111.2 + 11.0 * i, f"Left line number {i} extra words") for i in range(6)]
+                + [(305.135, 111.2, "Right line 0"), (305.135, 122.2, "Right line 1")]
+            )
+            lines_p2 = [(76.535, 111.2 + 11.0 * i, f"Page two line {i}") for i in range(4)]
+            _make_pdf_lines(str(pdf), [(lines_p1, []), (lines_p2, [])])
+            teks_dasar = (
+                "#kolom[\n"
+                "#pm(1);" + " ".join(f"Left line number {i} extra words" for i in range(6)) + "#pe(1)\n\n"
+                "#pm(2);Page two line 0 Page two line 1 Page two line 2 Page two line 3#pe(2)\n"
+                "]\n"
+            )
+            teks_split = engine.potong_paragraf(teks_dasar, 1, "Left line number 4 extra words")
+            self.assertIsNotNone(teks_split)
+            pos = {
+                "pm-1": (1, 1, 76.535, 102.4),
+                "pm-2": (2, 1, 305.135, 102.4),
+            }
+            self.assertIsNone(engine.cari_potong(str(pdf), pos, 1, 0, 2, teks_split))
+            refined = engine.cari_potong(str(pdf), pos, 1, 0, 2, teks_split, teks_dasar=teks_dasar)
+            self.assertEqual(refined, ("belah", 1, "Left line number 4 extra words"))
+
+    def test_compact_table_deferred_as_tunda_not_geser(self):
+        with tempfile.TemporaryDirectory(dir=BASE, prefix="test-tbl-tunda-") as td:
+            td_p = Path(td)
+            body_dasar = (
+                '#import "/template_jurnal.typ": *\n'
+                "#kolom[\n"
+                "#pm(1);" + ("Introductory sentence before table on the first page. " * 100) + "#pe(1)\n\n"
+                "#pm(2);" + ("Second paragraph filling the page right up to the compact table. " * 52) + "#pe(2)\n\n"
+                "]\n"
+                '#tabel(jumlah-kolom: 2, penuh: true, kepala: 2, di-tempat: true, keputusan: "@K1@", label: [Table 1.], isi: [Compact table])[\n'
+                "#table(\n"
+                "  columns: (200pt, 200pt),\n"
+                "  [Col A], [Col B],\n"
+                + "".join(f"  [Val {i}A], [Val {i}B],\n" for i in range(1, 11))
+                + ")\n"
+                "]\n"
+                "#kolom[\n"
+                "#pm(3);" + ("Following paragraph after table. " * 35) + "#pe(3)\n\n"
+                "#pm(4);" + ("Second following paragraph on page two. " * 30) + "#pe(4)\n"
+                "]\n"
+            )
+            body_path = td_p / "body.typ"
+            meta_json = td_p / "meta.json"
+            main_typ = td_p / "main.typ"
+            pdf_out = td_p / "out.pdf"
+            body_path.write_text(body_dasar, encoding="utf-8")
+            meta_json.write_text(
+                json.dumps({
+                    "judul": "Compact Table Deferral Test",
+                    "penulis": [{"nama": "Author", "afiliasi": "1", "korespondensi": True}],
+                    "afiliasi": ["Inst"],
+                    "email": "a@example.com",
+                    "riwayat": {},
+                    "abstrak": "Abstract paragraph.",
+                    "kata_kunci": ["a", "b"],
+                    "sitasi_penulis": "Author, A.",
+                    "judul_kalimat": "Compact table deferral test",
+                    "header_ganjil": "Author, Compact",
+                    "terbitan": {"volume": "5", "nomor": "4", "edisi": "December", "tahun": "2026", "halaman_awal": 1},
+                }),
+                encoding="utf-8",
+            )
+            rel_td = td_p.relative_to(BASE).as_posix()
+            main_typ.write_text(
+                '#import "/template_jurnal.typ": *\n'
+                '#let cfg = json("/jurnal/bsscd/config.json")\n'
+                f'#let meta = json("/{rel_td}/meta.json")\n'
+                '#show: artikel.with(cfg, meta)\n'
+                '#include "body.typ"\n',
+                encoding="utf-8",
+            )
+            kp, log_p = engine.putuskan_objek(
+                body_dasar, str(body_path), str(td_p), str(pdf_out), {1: {"jenis": "tempat"}}, [(1, 2, 3)]
+            )
+            self.assertEqual(kp[1]["jenis"], "tunda", (kp, log_p))
+            self.assertFalse(kp[1].get("maju"), (kp, log_p))
+            self.assertTrue(any("Tabel 1 -> tunda" in m for m in log_p), log_p)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
