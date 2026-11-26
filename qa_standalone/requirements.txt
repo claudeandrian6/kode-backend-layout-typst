@@ -1,0 +1,4 @@
+pymupdf>=1.24.0
+Pillow>=10.0.0
+# Opsional untuk drag-and-drop langsung ke jendela di Windows:
+tkinterdnd2>=0.3.0

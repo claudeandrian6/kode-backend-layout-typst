@@ -150,8 +150,8 @@
 
 #let blok-judul(meta, header-grid: 0pt) = {
   set par(justify: false, leading: 1pt, first-line-indent: 0pt)
-  let d-judul = if header-grid == -22pt { 17pt } else if header-grid == -11pt { 20pt } else { 25pt }
-  let d-bawah = if header-grid == -22pt { 6.4pt } else { 10.4pt }
+  let d-judul = if header-grid == -22pt { 16pt } else if header-grid == -11pt { 20pt } else if header-grid == 11pt { 29pt } else if header-grid == 22pt { 33pt } else { 25pt }
+  let d-bawah = if header-grid == -22pt { 5.4pt } else if header-grid == -11pt { 8.4pt } else if header-grid == 11pt { 12.4pt } else if header-grid == 22pt { 14.4pt } else { 10.4pt }
   _tanda-meta("meta-judul")
   judul-segitiga(meta.judul, it => text(13pt, weight: "bold", it))
   _tanda-meta("blk-akhir-m-judul", nilai: "akhir")
@@ -1169,9 +1169,9 @@
     },
   )
   // ---- Blok halaman 1 (selebar halaman, mengambang di atas) ----
-  let clr-hal1 = if header-grid > 0pt { 5pt + header-grid } else if header-grid < 0pt { 2pt } else { 5pt }
-  let d-abstrak = if header-grid == -22pt { 9.9pt } else { 12.9pt }
-  let v-sitasi = if header-grid == -22pt { 1.1pt } else if header-grid == -11pt { 2.1pt } else { 5.1pt }
+  let clr-hal1 = 21.5pt
+  let d-abstrak = if header-grid == -22pt { 8.9pt } else if header-grid == -11pt { 10.9pt } else if header-grid == 11pt { 15.9pt } else if header-grid == 22pt { 18.9pt } else { 12.9pt }
+  let v-sitasi = if header-grid == -22pt { 1.1pt } else if header-grid == -11pt { 3.1pt } else if header-grid == 11pt { 7.1pt } else if header-grid == 22pt { 9.1pt } else { 5.1pt }
   context {
     let base-top = if KEPALA-TURUN.final().values().any(v => v < 0pt) { 22pt } else { 0pt }
     let base-bot = if KAKI-NAIK.final().values().any(v => v < 0pt) { 22pt } else { 0pt }

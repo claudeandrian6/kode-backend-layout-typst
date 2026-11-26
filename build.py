@@ -2496,6 +2496,19 @@ def ubah_emf(workdir, laporan):
     laporan["peringatan"].append("{} gambar EMF/WMF dikonversi ke PNG 300 dpi".format(len(berkas)))
 
 
+def _tutup_kolom_sebelum(teks, p):
+    """True hanya bila ']\\n' tepat sebelum indeks `p` menutup blok #kolom[...] /
+    #kolom-lanjut[...], bukan penutup ']' milik #tabel(...)[...] yang tepat sebelumnya."""
+    if p < 2 or teks[p - 2:p] != "]\n":
+        return False
+    k_idx = -1
+    for m in re.finditer(r"^#kolom(?:-lanjut)?(?:\([^)\n]*\))?\[", teks[:p - 1], flags=re.M):
+        k_idx = m.end() - 1
+    if k_idx < 0:
+        return False
+    return akhir_kurung_typst(teks, k_idx) == p - 2
+
+
 def gabung_kolom_apung(teks, keputusan):
     """FIX-APUNG-GABUNG: objek selebar halaman yang mengapung tidak perlu memutus kolom.
     Pola ']\n<objek>...\n#kolom[\n' digabung sehingga float dipicu dari dalam kolom dan
@@ -2504,9 +2517,11 @@ def gabung_kolom_apung(teks, keputusan):
         if v != "apung":
             continue
         i = teks.find('"@K{}@"'.format(k))
+        if i < 0:
+            continue
         p = teks.rfind("\n", 0, i) + 1                      # awal baris objek
         q = teks.find("\n#kolom[\n", i)                    # pembuka segmen sesudahnya
-        if p < 2 or teks[p - 2:p] != "]\n" or q < 0:
+        if not _tutup_kolom_sebelum(teks, p) or q < 0:
             continue                                          # objek satu kolom: tak diputus
         lain = teks.find('"@K', i + 3)
         if lain != -1 and lain < q:
@@ -2833,7 +2848,7 @@ def susun_teks(body_dasar, keputusan, hapus=None, akhir_seimbang=False):
         if kp["jenis"] not in ("geser", "pindah_pita") or k == hapus or not kp.get("target"):
             continue
         p, q = blok_objek(teks, k)
-        if teks[p - 2:p] != "]\n" or not teks.startswith("#kolom[\n", q):
+        if not _tutup_kolom_sebelum(teks, p) or not teks.startswith("#kolom[\n", q):
             continue
         objek = teks[p:q]
         teks = teks[:p - 2] + teks[q + len("#kolom[\n"):]
@@ -2923,6 +2938,19 @@ def tabel_baris_body(teks, k):
     jml_sel = sum(1 for ln in isi.splitlines()
                   if ln.strip().startswith(("table.cell(", "[")))
     return int(math.ceil(jml_sel / float(jml_kol)))
+
+
+def _tabel_lintas_sejati(body, k, info, akhir, tabel_panjang=()):
+    """True hanya bila tabel benar-benar terlalu tinggi untuk satu halaman (tidak boleh diapungkan),
+    bukan tabel ringkas (< 15 baris & tinggi total <= 560 pt) yang kebetulan terpotong di dasar halaman."""
+    if k in tabel_panjang:
+        return True
+    if not (akhir and info and akhir[1] != info[1]):
+        return False
+    if tabel_baris_body(body, k) >= 15 or (akhir[1] - info[1]) >= 2:
+        return True
+    tinggi_total = max(0.0, 762.0 - info[3]) + max(0.0, akhir[3] - 102.4)
+    return tinggi_total > 560.0
 
 
 def label_dan_nomor(body_dasar, k):
@@ -3205,14 +3233,29 @@ def putuskan_objek(body_dasar, body_path, workdir, pdf, keputusan, peta_objek):
                                    os.path.join(BASE, "fonts"), main, pdf_pita])
             for pt in (pita_kecil(pdf_pita, pos, penuh_obj) if rc_p == 0 else []):
                 if pt["letak"] == "tengah":
+                    # FIX-SANDWICH-BAWAH: bila masih ada teks di bawah objek kedua (objek bawah
+                    # berada di tengah halaman sehingga teks terjepit di antara dua objek), dorong
+                    # objek bawah ke dasar halaman agar kedua porsi teks menyatu di atasnya.
+                    k_a, k_b = pt["atas"], pt["bawah"]
+                    j_a = keputusan.get(k_a, {}).get("jenis")
+                    j_b = keputusan.get(k_b, {}).get("jenis")
+                    I_b = pos.get("objek-info-{}".format(k_b))
+                    A_b = pos.get("objek-akhir-{}".format(k_b))
+                    lintas_b = _tabel_lintas_sejati(body_dasar, k_b, I_b, A_b, tabel_panjang)
+                    if pt.get("ada_bawah") and not lintas_b and j_b in ("tempat", "kecil"):
+                        kp_b = dict(keputusan[k_b], jenis="bawah")
+                        for mk in ("target", "mode", "n_pm", "teks_baris", "maju", "maju_hal", "lanjut"):
+                            kp_b.pop(mk, None)
+                        ubah = (k_b, kp_b)
+                        log.append("Objek {}: teks terjepit {} baris di antara Objek {} dan Objek {} di hlm {} "
+                                   "-> dorong Objek {} ke dasar halaman".format(
+                                       k_b, pt["baris"], k_a, k_b, pt["hal"], k_b))
+                        break
                     # FIX-SANDWICH-RULE: teks < 7 baris terjepit di antara Objek k_atas dan k_bawah.
                     # Solusi 1: bila k_atas adalah float (tunda/atas) dan k_bawah adalah objek in-flow
                     # (tempat/geser) serta baris teks >= 3, ubah k_atas menjadi 'geser' ke target k_bawah
                     # sehingga teks naik ke puncak halaman (sebelum k_atas) dan k_atas menempel rapat
                     # dengan k_bawah.
-                    k_a, k_b = pt["atas"], pt["bawah"]
-                    j_a = keputusan.get(k_a, {}).get("jenis")
-                    j_b = keputusan.get(k_b, {}).get("jenis")
                     if (j_a in ("tunda", "atas") and j_b in ("tempat", "geser")
                             and pt["baris"] >= PITA_TEPI_MIN
                             and not body_dasar[slice(*blok_objek(body_dasar, k_a))].startswith("#tabel(")):
@@ -3264,12 +3307,15 @@ def putuskan_objek(body_dasar, body_path, workdir, pdf, keputusan, peta_objek):
                 elif pt["letak"] == "bawah":
                     calon = [(pt["atas"], "bawah")]
                 else:
-                    calon = [(pt["atas"], "atas"), (pt["bawah"], "bawah"), (pt["bawah"], "tunda")]
+                    if pt.get("ada_bawah") or keputusan.get(pt["atas"], {}).get("jenis") in ("atas", "tunda", "geser"):
+                        calon = [(pt["bawah"], "bawah"), (pt["atas"], "atas"), (pt["bawah"], "tunda")]
+                    else:
+                        calon = [(pt["atas"], "atas"), (pt["bawah"], "bawah"), (pt["bawah"], "tunda")]
                 for k2, arah in calon:
                     j2 = keputusan.get(k2, {}).get("jenis")
                     I2, P2 = pos.get("objek-info-{}".format(k2)), pos.get("objek-posisi-{}".format(k2))
                     A2 = pos.get("objek-akhir-{}".format(k2))
-                    if k2 in tabel_panjang or (A2 and I2 and A2[1] != I2[1]):
+                    if _tabel_lintas_sejati(body_dasar, k2, I2, A2, tabel_panjang):
                         # FIX-PITA-TABEL-ATAS: tabel lintas halaman tidak bisa diapungkan;
                         # pita teks di atasnya dipindah ke segmen sesudah tabel, atau digeser ke halaman berikut.
                         if pt["letak"] in ("atas", "tengah") and j2 in ("tempat", "geser") and I2:
@@ -3342,17 +3388,22 @@ def putuskan_objek(body_dasar, body_path, workdir, pdf, keputusan, peta_objek):
                     if lb["selisih"] <= 44.0:
                         continue
                     h_lb = lb["hal"]
-                    for k_b in sorted(keputusan):
-                        if (penuh_obj.get(k_b) and k_b not in tabel_panjang and k_b not in coba_lubang
-                                and keputusan[k_b].get("jenis") == "tempat"):
-                            I_b = pos.get("objek-info-{}".format(k_b))
-                            A_b = pos.get("objek-akhir-{}".format(k_b))
-                            if I_b and I_b[1] == h_lb and I_b[3] > 130 and (not A_b or A_b[1] == h_lb):
-                                coba_lubang.add(k_b)
-                                ubah = (k_b, {"jenis": "bawah"})
-                                log.append("Objek {} -> bawah (tutup lubang kolom hlm {}, {:.0f} pt)".format(
-                                    k_b, h_lb, lb["selisih"]))
-                                break
+                    for h_cari in (h_lb, h_lb + 1):
+                        for k_b in sorted(keputusan):
+                            if (penuh_obj.get(k_b) and k_b not in tabel_panjang and k_b not in coba_lubang
+                                    and keputusan[k_b].get("jenis") == "tempat"):
+                                I_b = pos.get("objek-info-{}".format(k_b))
+                                A_b = pos.get("objek-akhir-{}".format(k_b))
+                                if (I_b and I_b[1] == h_cari
+                                        and (h_cari != h_lb or I_b[3] > 130)
+                                        and (not A_b or A_b[1] == h_cari)):
+                                    coba_lubang.add(k_b)
+                                    ubah = (k_b, {"jenis": "bawah"})
+                                    log.append("Objek {} -> bawah (tutup lubang kolom hlm {}, {:.0f} pt)".format(
+                                        k_b, h_lb, lb["selisih"]))
+                                    break
+                        if ubah:
+                            break
                     if ubah:
                         break
         if not ubah:
@@ -3426,26 +3477,49 @@ def putuskan_objek(body_dasar, body_path, workdir, pdf, keputusan, peta_objek):
             break
         diubah_jdl = False
         batas_ruang = 660.0 - (PITA_TOTAL_MIN + 4) * 11.0
-        # Kumpulkan grup gambar penuh yang berbagi halaman tampil ATAU berbagi target tunda
+        # Kumpulkan grup gambar penuh yang berbagi halaman tampil ATAU berbagi target tunda,
+        # serta halaman padat berisi >= 1 gambar penuh + >= 1 tabel penuh satu halaman.
         grup_kandidat = []
+        seen_grup = []
         per_hlm = {}
         per_tgt = {}
+        per_hlm_semua_gbr = {}
+        per_hlm_tetap = {}
         for k in sorted(keputusan):
-            if keputusan[k].get("jenis") != "tunda":
-                continue
             if not penuh_obj.get(k):
                 continue
-            if not body_dasar[slice(*blok_objek(body_dasar, k))].startswith("#gambar("):
-                continue
+            blk_k = body_dasar[slice(*blok_objek(body_dasar, k))]
             I_k = pos.get("objek-info-{}".format(k))
-            if I_k:
-                per_hlm.setdefault(I_k[1], []).append(k)
-            tgt_k = keputusan[k].get("target")
-            if tgt_k is not None:
-                per_tgt.setdefault((tgt_k, bool(keputusan[k].get("maju"))), []).append(k)
-        for g in list(per_hlm.values()) + list(per_tgt.values()):
-            if len(g) >= 2 and g not in grup_kandidat:
-                grup_kandidat.append(g)
+            A_k = pos.get("objek-akhir-{}".format(k))
+            jns_k = keputusan[k].get("jenis")
+            if blk_k.startswith("#gambar(") and "chart_render_" not in blk_k:
+                if I_k and jns_k in ("tunda", "atas", "bawah", "tempat"):
+                    per_hlm_semua_gbr.setdefault(I_k[1], []).append(k)
+                if jns_k == "tunda":
+                    if I_k:
+                        per_hlm.setdefault(I_k[1], []).append(k)
+                    tgt_k = keputusan[k].get("target")
+                    if tgt_k is not None:
+                        per_tgt.setdefault((tgt_k, bool(keputusan[k].get("maju"))), []).append(k)
+            elif blk_k.startswith("#tabel(") or "chart_render_" in blk_k:
+                if not I_k or (A_k and A_k[1] != I_k[1]):
+                    continue
+                h_pg = I_k[1]
+                h_fix = (A_k[3] - I_k[3]) if (A_k and A_k[1] == h_pg) else (
+                    float(I_k[0][1]) if isinstance(I_k[0], (list, tuple)) else 0.0
+                )
+                extra_fix = 22.0 if jns_k == "tempat" else 8.0
+                per_hlm_tetap[h_pg] = per_hlm_tetap.get(h_pg, 0.0) + math.ceil(
+                    (h_fix + extra_fix) / 11.0 - 0.001
+                ) * 11.0
+        for h_pg, g in sorted(per_hlm.items()):
+            if len(g) >= 2 and g not in seen_grup:
+                seen_grup.append(g)
+                grup_kandidat.append((g, per_hlm_tetap.get(h_pg, 0.0)))
+        for g in list(per_tgt.values()):
+            if len(g) >= 2 and g not in seen_grup:
+                seen_grup.append(g)
+                grup_kandidat.append((g, 0.0))
         for k in sorted(keputusan):
             if keputusan[k].get("jenis") != "tunda" or not penuh_obj.get(k):
                 continue
@@ -3464,12 +3538,17 @@ def putuskan_objek(body_dasar, body_path, workdir, pdf, keputusan, peta_objek):
                 ]
                 if k_prevs:
                     g_jdl = sorted(k_prevs + [k])
-                    if g_jdl not in grup_kandidat:
-                        grup_kandidat.append(g_jdl)
+                    if g_jdl not in seen_grup:
+                        seen_grup.append(g_jdl)
+                        grup_kandidat.append((g_jdl, 0.0))
+        for h_pg, gbrs in sorted(per_hlm_semua_gbr.items()):
+            if gbrs and per_hlm_tetap.get(h_pg, 0.0) > 0 and gbrs not in seen_grup:
+                seen_grup.append(gbrs)
+                grup_kandidat.append((gbrs, per_hlm_tetap[h_pg]))
 
-        for sebagian in grup_kandidat:
+        for sebagian, jejak_lain in grup_kandidat:
             tinggi_asli = []
-            jejak_kini = 0.0
+            jejak_kini = jejak_lain
             for kk in sebagian:
                 uk = ukuran_gambar(body_dasar[slice(*blok_objek(body_dasar, kk))])
                 I_kk = pos.get("objek-info-{}".format(kk))
@@ -3477,8 +3556,9 @@ def putuskan_objek(body_dasar, body_path, workdir, pdf, keputusan, peta_objek):
                     sk_kini = keputusan[kk].get("skala", 1.0)
                     t_kini = I_kk[4] if len(I_kk) > 4 else (I_kk[0][1] if isinstance(I_kk[0], (list, tuple)) else uk[1] * sk_kini)
                     t_tetap = max(0.0, float(t_kini) - uk[1] * sk_kini)
-                    tinggi_asli.append((kk, uk[1], t_tetap))
-                    jejak_kini += math.ceil((float(t_kini) + 8.0) / 11.0 - 0.001) * 11.0
+                    extra_kk = 22.0 if keputusan[kk].get("jenis") == "tempat" else 8.0
+                    tinggi_asli.append((kk, uk[1], t_tetap, extra_kk))
+                    jejak_kini += math.ceil((float(t_kini) + extra_kk) / 11.0 - 0.001) * 11.0
             if len(tinggi_asli) != len(sebagian):
                 continue
             if jejak_kini <= batas_ruang:
@@ -3486,14 +3566,18 @@ def putuskan_objek(body_dasar, body_path, workdir, pdf, keputusan, peta_objek):
             skala_pilih = None
             for s_int in range(95, 69, -1):
                 s = s_int / 100.0
-                total_jejak = sum(math.ceil((h_a * s + t_t + 8.0) / 11.0 - 0.001) * 11.0
-                                  for _, h_a, t_t in tinggi_asli)
+                total_jejak = jejak_lain + sum(
+                    math.ceil((h_a * s + t_t + ex_k) / 11.0 - 0.001) * 11.0
+                    for _, h_a, t_t, ex_k in tinggi_asli
+                )
                 if total_jejak <= batas_ruang:
                     skala_pilih = s
                     break
             if skala_pilih is None:
-                skala_pilih = 0.75
-            for kk, _, _ in tinggi_asli:
+                skala_pilih = 0.72 if jejak_lain > 0 else 0.75
+            for kk, _, _, _ in tinggi_asli:
+                if jejak_lain > 0 and skala_pilih >= keputusan[kk].get("skala", 1.0):
+                    continue
                 if keputusan[kk].get("skala") != skala_pilih:
                     keputusan[kk] = dict(keputusan[kk], skala=skala_pilih)
                     diubah_jdl = True
@@ -3656,6 +3740,7 @@ def baseline_target_sama(pasangan, delta):
 PITA_TOTAL_MIN = 10          # FIX-PITA-TOTAL: min. baris teks per kolom di halaman berobjek
 PITA_TEPI_MIN = 5            # FIX-PITA-MIN5: min. 5 baris (55 pt) teks di atas objek pertama / di bawah objek terakhir
 PITA_TENGAH_MIN = 7          # FIX-SANDWICH-RULE: min. 7 baris (77 pt) teks terjepit di antara dua objek
+PITA_TERJEPIT_TENGAH_MIN = 13  # FIX-SANDWICH-BAWAH: bila objek bawah masih di tengah (ada teks di bawahnya), teks terjepit < 13 baris harus mendorong objek bawah ke dasar halaman
 
 
 def pita_kecil(pdf, pos, penuh, teks=""):
@@ -3700,18 +3785,27 @@ def pita_kecil(pdf, pos, penuh, teks=""):
         batas = [(ATAS, None)] + [x for o in kot for x in ((o[0], o[2]), (o[1], o[2]))] + [(BAWAH, None)]
         L = [set(baris(hal, 0)), set(baris(hal, 1))]
         total = [0, 0]
+        band_n = []
         for i in range(0, len(batas), 2):
-            (a, n_atas), (z, n_bawah) = batas[i], batas[i + 1]
+            a, z = batas[i][0], batas[i + 1][0]
             for c in (0, 1):
                 total[c] += sum(1 for y in L[c] if a < y < z + 1)
-            n = max(sum(1 for y in L[c] if a < y < z + 1) for c in (0, 1))
+            band_n.append(max(sum(1 for y in L[c] if a < y < z + 1) for c in (0, 1)))
+        for idx_b in range(0, len(batas), 2):
+            (a, n_atas), (z, n_bawah) = batas[idx_b], batas[idx_b + 1]
+            n = band_n[idx_b // 2]
             letak = "atas" if n_atas is None else ("bawah" if n_bawah is None else "tengah")
             if hal == 1 and letak == "atas":
                 continue
-            # FIX-PITA-MIN3 & FIX-SANDWICH-RULE: tepi halaman min. 3 baris; di antara dua objek min. 7 baris.
-            batas_min = PITA_TENGAH_MIN if letak == "tengah" else PITA_TEPI_MIN
+            ada_bawah = letak == "tengah" and (idx_b + 2 < len(batas)) and (band_n[(idx_b + 2) // 2] > 0)
+            # FIX-PITA-MIN3 & FIX-SANDWICH-RULE: tepi halaman min. 5 baris; di antara dua objek min. 7 baris
+            # (atau < 10 baris bila objek kedua masih di tengah dan menyisakan teks di bawahnya).
+            batas_min = (PITA_TERJEPIT_TENGAH_MIN if ada_bawah else PITA_TENGAH_MIN) if letak == "tengah" else PITA_TEPI_MIN
             if 0 < n < batas_min:
-                hasil.append(dict(hal=hal, letak=letak, baris=n, atas=n_atas, bawah=n_bawah))
+                info_pt = dict(hal=hal, letak=letak, baris=n, atas=n_atas, bawah=n_bawah, batas_min=batas_min)
+                if letak == "tengah":
+                    info_pt["ada_bawah"] = ada_bawah
+                hasil.append(info_pt)
         # FIX-PITA-TOTAL: halaman yang memuat objek selebar halaman harus berisi minimal
         # PITA_TOTAL_MIN baris teks per kolom (kecuali tanpa teks sama sekali); bila tidak, teksnya
         # tampak seperti "sisa" di sekitar objek yang hampir sepenuh halaman.
@@ -3838,7 +3932,8 @@ def baris_tunggal(pdf, pos, teks=""):
             ve_key = pos.get("frag-akhir-{}-0".format(n))
             ve = ve_key or v
             h_j, c_j = v[1], (0 if v[2] < 300 else 1)
-            y_hdg_end = ve[3] + 8.8
+            # Di Typst nyata #pe() berada di baseline (ve[3] - v[3] > 4pt); pada mock test bisa di top.
+            y_hdg_end = ve[3] if (ve_key and ve[1] == v[1] and ve[3] - v[3] > 4.0) else (ve[3] + 8.8)
             ri = next((
                 idx_r for idx_r, (hr, cr, run) in enumerate(region)
                 if (hr, cr) == (h_j, c_j) and run[0][0] - 2.0 <= y_hdg_end <= run[-1][0] + 2.0
@@ -3865,9 +3960,15 @@ def baris_tunggal(pdf, pos, teks=""):
                     hasil.append(dict(jenis="judul", hal=h_j, kol=c_j, y=round(y_hdg_end, 1), pm=n))
                 elif len(bawah) == 1:
                     ve_next = pos.get("frag-akhir-{}-0".format(next_pm))
+                    v_next = pos.get("pm-{}".format(next_pm))
                     split_next = False
                     if ve_next:
-                        if (ve_next[1], 0 if ve_next[2] < 300 else 1) != (h_j, c_j) or ve_next[3] + 8.8 > run[-1][0] + 2.0:
+                        y_next_end = (
+                            ve_next[3]
+                            if (v_next and ve_next[1] == v_next[1] and ve_next[3] - v_next[3] > 4.0)
+                            else (ve_next[3] + 8.8)
+                        )
+                        if (ve_next[1], 0 if ve_next[2] < 300 else 1) != (h_j, c_j) or y_next_end > run[-1][0] + 2.0:
                             split_next = True
                     elif ri + 1 < len(region):
                         h2, c2, run2 = region[ri + 1]
@@ -4526,7 +4627,7 @@ def pindah_pita_atas_tabel(teks, k, mode, n_pm, teks_baris=""):
     mode 'putus_par' = pita mulai di awal paragraf (seluruh paragraf dipindah);
     mode 'belah_par' = pita adalah lanjutan paragraf yang dimulai di halaman sebelumnya."""
     p, q = blok_objek(teks, k)
-    if p < 2 or teks[p - 2:p] != "]\n" or not teks.startswith("#kolom[\n", q):
+    if not _tutup_kolom_sebelum(teks, p) or not teks.startswith("#kolom[\n", q):
         return teks
     if mode == "putus_par":
         m = re.search(r"^#pm\({}\);".format(n_pm), teks[:p - 2], flags=re.M)
@@ -4540,12 +4641,12 @@ def pindah_pita_atas_tabel(teks, k, mode, n_pm, teks_baris=""):
     if not r or r[4] or "#pf({},".format(n_pm) in teks:
         return teks
     awal, akhir, bag1, bag2, _ = r
-    bag1 = bag1.removesuffix("#linebreak()") + "#pe({})#linebreak()".format(n_pm)
+    bag1 = bag1.removesuffix("#linebreak()") + "#pe({})#linebreak(justify: true)".format(n_pm)
     bag2 = "#pf({}, 1);".format(n_pm) + bag2.replace("#pe({})".format(n_pm),
                                                      "#pe({}, bagian: 1)".format(n_pm))
     sementara = teks[:awal] + bag1 + teks[akhir:]
     p2, q2 = blok_objek(sementara, k)
-    if p2 < 2 or sementara[p2 - 2:p2] != "]\n" or not sementara.startswith("#kolom[\n", q2):
+    if not _tutup_kolom_sebelum(sementara, p2) or not sementara.startswith("#kolom[\n", q2):
         return teks
     sisip = q2 + len("#kolom[\n")
     depan, belakang = sementara[:p2 - 2], sementara[sisip:]
@@ -4565,7 +4666,8 @@ def potong_paragraf(t, n, teks_baris):
     awal, akhir, bag1, bag2, ref = r
     if "#pf({},".format(n) in t:
         return None
-    bag1 = bag1.removesuffix("#linebreak()") + "#pe({})#linebreak()".format(n)
+    br = "#linebreak()" if ref else "#linebreak(justify: true)"
+    bag1 = bag1.removesuffix("#linebreak()") + "#pe({})".format(n) + br
     bag2 = "#pf({}, 1);".format(n) + bag2.replace("#pe({})".format(n),
                                                                "#pe({}, bagian: 1)".format(n))
     if ref == "wawancara":
@@ -4575,10 +4677,119 @@ def potong_paragraf(t, n, teks_baris):
     return t[:awal] + bag1 + "\n\n#colbreak()\n#lanjutan[" + bag2 + "]" + t[akhir:]
 
 
+def _pecah_awalan_kata_typst(isi, jumlah_kata):
+    """Pecah `jumlah_kata` kata pertama dari teks paragraf Typst pada batas aman.
+
+    Menghindari pemotongan di dalam markup `#emph[...]` / `#strong[...]`, literal math
+    `$...$`, maupun panggilan `#fungsi(...)`, serta memastikan sisa paragraf sumber
+    tetap cukup panjang (>= 10 kata & >= 65 karakter terlihat) agar tidak memicu widow.
+    """
+    if not isi or not (1 <= jumlah_kata <= 18):
+        return None
+    tumpukan, rumus, k = [], False, 0
+    in_word, kata = False, 0
+    cut_pos = None
+    n_len = len(isi)
+    while k < n_len:
+        c = isi[k]
+        if c == "\\":
+            if not tumpukan and not rumus:
+                in_word = True
+            k = min(k + 2, n_len)
+            continue
+        mt = re.match(r"#(?:emph|strong)\[", isi[k:])
+        if mt:
+            tumpukan.append(mt.group(0))
+            in_word = True
+            k += mt.end()
+            continue
+        panggil = re.match(r"#[A-Za-z_][\w-]*\(", isi[k:])
+        if panggil:
+            tutup = akhir_kurung_typst(isi, k + panggil.end() - 1)
+            if tutup is None:
+                return None
+            if not tumpukan and not rumus:
+                in_word = True
+            k = tutup + 1
+            continue
+        if c == "$":
+            rumus = not rumus
+            in_word = True
+            k += 1
+            continue
+        if c == "[":
+            tumpukan.append("[")
+            in_word = True
+            k += 1
+            continue
+        if c == "]":
+            if not tumpukan:
+                return None
+            tumpukan.pop()
+            k += 1
+            continue
+        if not tumpukan and not rumus and c.isspace():
+            if in_word:
+                kata += 1
+                in_word = False
+                if kata == jumlah_kata:
+                    cut_pos = k
+                    break
+            k += 1
+            continue
+        if not tumpukan and not rumus:
+            in_word = True
+        k += 1
+    if cut_pos is None:
+        return None
+    bagian_tarik = isi[:cut_pos].strip()
+    sisa = isi[cut_pos:].lstrip()
+    if not bagian_tarik or not sisa:
+        return None
+    if "$" in bagian_tarik or any(tok in bagian_tarik for tok in ("#pm(", "#pf(", "#pe(", "#colbreak", "#tabel", "#gambar", "#rumus")):
+        return None
+    vis_sisa = re.sub(r"#(?:emph|strong)\[|\]|\\([()\[\]])", lambda m: m.group(1) or "", sisa)
+    vis_sisa_bersih = re.sub(r"\s+", " ", vis_sisa).strip()
+    if len(vis_sisa_bersih.split()) < 10 or len(vis_sisa_bersih) < 65:
+        return None
+    return bagian_tarik, sisa
+
+
+def tarik_kata_paragraf(t, n_tujuan, n_sumber, jumlah_kata):
+    """Trik Tarik Kata (Word-Stealing): pindahkan `jumlah_kata` kata awal dari paragraf
+    narasi `#pm(n_sumber)` ke akhir `#pm(n_tujuan)` disertai `#linebreak(justify: true)` +
+    `#colbreak()`, menjaga kesesuaian fragmen QA dan mencegah widow/orphan baru."""
+    if not t or "#pf({},".format(n_tujuan) in t or "#pf({},".format(n_sumber) in t:
+        return None
+    m1 = re.search(r"^#pm\({}\);([^\n]*)#pe\({}\)$".format(n_tujuan, n_tujuan), t, flags=re.M)
+    m2 = re.search(r"^#pm\({}\);([^\n]*)#pe\({}\)$".format(n_sumber, n_sumber), t, flags=re.M)
+    if not m1 or not m2 or m1.end() >= m2.start():
+        return None
+    if t[m1.end():m2.start()].strip():
+        return None
+    isi_tujuan, isi_sumber = m1.group(1), m2.group(1)
+    terlarang = ("#h(-25pt)", "#rumus", "#colbreak", "#linebreak", "#pf(", "#pm(")
+    if any(tok in isi_tujuan for tok in terlarang) or any(tok in isi_sumber for tok in terlarang):
+        return None
+    pecah = _pecah_awalan_kata_typst(isi_sumber, jumlah_kata)
+    if not pecah:
+        return None
+    bagian_tarik, sisa_sumber = pecah
+    baris_tujuan_baru = "#pm({});{} {}#pe({})#linebreak(justify: true)".format(
+        n_tujuan, isi_tujuan.rstrip(), bagian_tarik.strip(), n_tujuan
+    )
+    baris_sumber_baru = "#lanjutan[#pm({});{}#pe({})]".format(
+        n_sumber, sisa_sumber.lstrip(), n_sumber
+    )
+    return t[:m1.start()] + baris_tujuan_baru + "\n\n#colbreak()\n" + baris_sumber_baru + t[m2.end():]
+
 
 def terapkan_potong(t, spec):
     """FIX-SEJAJARKAN: ("putus", n) = #colbreak() sebelum paragraf/judul/entri n;
-    ("belah", n, teks) = potong paragraf n sebelum baris `teks`."""
+    ("belah", n, teks) = potong paragraf n sebelum baris `teks`;
+    ("tarik", n1, n2, k) = tarik k kata awal dari paragraf n2 ke akhir paragraf n1."""
+    if spec[0] == "tarik":
+        return tarik_kata_paragraf(t, spec[1], spec[2], spec[3])
     if spec[0] == "belah":
         return potong_paragraf(t, spec[1], spec[2])
     m = re.search(r"^(?:=+ |#referensi\[|#wawancara\[)?#pm\({}\);".format(spec[1]), t, flags=re.M)
@@ -4668,6 +4879,9 @@ def cari_potong(pdf, pos, hal, kol, m, teks, teks_dasar=None):
             break
         pindah_n += 1
     if pindah_n == 1 and pindah_n == len(ys[idx:]):
+        ve_p = pos.get("frag-akhir-{}-0".format(n_p))
+        if ve_p and (ve_p[1], 0 if ve_p[2] < 300 else 1) == (hal, kol):
+            return None
         h2, c2 = (hal, 1) if kol == 0 else (hal + 1, 0)
         lanjut = awal_baris(h2, c2)
         garis2 = sorted(round(l["spans"][0]["origin"][1], 1) for l in (baris_narasi_terlihat(pdf, h2) if h2 <= _jumlah_halaman(pdf) else []) if l["spans"] and abs(l["spans"][0]["size"] - 11) < 0.2
@@ -4680,6 +4894,128 @@ def cari_potong(pdf, pos, hal, kol, m, teks, teks_dasar=None):
     if potong_paragraf(sumber_cek, n_p, teks_l) is None:
         return None
     return ("belah", n_p, teks_l)
+
+
+def cari_tarik_kata(pdf, pos, u, teks):
+    """Cari kandidat operator 'tarik' (`('tarik', n1, n2, k)`) pada kolom bermasalah
+    (kolom menggantung 1-3 baris atau orphan/fragmen di dasar kolom) dengan mengukur
+    lebar baris terakhir dan jumlah kata yang perlu ditarik dari paragraf berikutnya."""
+    if not pdf or not os.path.isfile(str(pdf)) or not pos or not teks:
+        return
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz
+    COL_W = 213.6
+    jml_hal = _jumlah_halaman(pdf)
+    area = area_objek_ketat(pos, teks)
+    targets = []
+    seen_target = set()
+    for x in u.get("kolom", []):
+        if x.get("penuh_objek") or x.get("kosong"):
+            continue
+        kurang = float(x.get("kurang") or 0.0)
+        if 10.5 <= kurang <= 34.0 and not (x["kol"] == 1 and x["hal"] == u.get("halaman")):
+            butuh = max(1, min(2, int(round(kurang / 11.0))))
+            key_t = (x["hal"], x["kol"], butuh)
+            if key_t not in seen_target:
+                seen_target.add(key_t)
+                targets.append(key_t)
+    for t_item in u.get("tunggal", []):
+        jenis_t = t_item.get("jenis")
+        if jenis_t == "widow":
+            h_prev, c_prev = (t_item["hal"], 0) if t_item["kol"] == 1 else (t_item["hal"] - 1, 1)
+            if h_prev >= 1:
+                key_t = (h_prev, c_prev, 0)
+                if key_t not in seen_target:
+                    seen_target.add(key_t)
+                    targets.append(key_t)
+            continue
+        if jenis_t not in ("orphan", "fragmen"):
+            continue
+        for b_opt in (1, 0):
+            key_t = (t_item["hal"], t_item["kol"], b_opt)
+            if key_t not in seen_target:
+                seen_target.add(key_t)
+                targets.append(key_t)
+    if not targets:
+        return
+
+    pm_all = [int(m) for m in re.findall(r"#pm\((\d+)\);", teks)]
+    pair_seen = set()
+    for hal, kol, butuh in targets[:6]:
+        if not (1 <= hal <= jml_hal):
+            continue
+        lines_col = []
+        for ln in baris_narasi_terlihat(pdf, hal):
+            sp = [s for s in ln["spans"] if s["text"].strip()]
+            if not sp or abs(sp[0]["size"] - 11) > 0.2 or ln["kol"] != kol:
+                continue
+            y = sp[0]["origin"][1]
+            if y <= 102.4 or any(ya - 0.5 <= y <= yb + 0.5 for ya, yb in area.get((hal, kol), [])):
+                continue
+            if all("math" in s["font"].lower() for s in sp) or RE_NOMOR_RUMUS.match("".join(s["text"] for s in sp).strip()):
+                continue
+            lines_col.append((y, ln["bbox"][2] - ln["bbox"][0]))
+        if not lines_col:
+            continue
+        lines_col.sort(key=lambda item: item[0])
+        y_last, w_last = lines_col[-1]
+        cand_ends = []
+        for lbl, ve in pos.items():
+            mf = re.fullmatch(r"frag-akhir-(\d+)-0", lbl)
+            if not mf:
+                continue
+            c_ve = 0 if ve[2] < 300 else 1
+            if ve[1] == hal and c_ve == kol and ve[3] <= y_last + 3.0:
+                cand_ends.append((ve[3], int(mf.group(1))))
+        if not cand_ends:
+            continue
+        y_end, n1 = max(cand_ends)
+        if abs(y_end - y_last) > 14.0 or n1 not in pm_all:
+            continue
+        _, w_end = min(lines_col, key=lambda item: abs(item[0] - y_end))
+        idx1 = pm_all.index(n1)
+        if idx1 + 1 >= len(pm_all):
+            continue
+        n2 = pm_all[idx1 + 1]
+        if (n1, n2, butuh) in pair_seen:
+            continue
+        m1 = re.search(r"^#pm\({}\);([^\n]*)#pe\({}\)$".format(n1, n1), teks, flags=re.M)
+        m2 = re.search(r"^#pm\({}\);([^\n]*)#pe\({}\)$".format(n2, n2), teks, flags=re.M)
+        if not m1 or not m2 or m1.end() >= m2.start() or teks[m1.end():m2.start()].strip():
+            continue
+        isi2 = m2.group(1)
+        exact_ks = []
+        for k in range(1, 19):
+            pecah = _pecah_awalan_kata_typst(isi2, k)
+            if not pecah:
+                continue
+            bag, _ = pecah
+            vis = re.sub(r"#(?:emph|strong)\[|\]|\\([()\[\]])", lambda m: m.group(1) or "", bag)
+            w_add = fitz.get_text_length(" " + re.sub(r"\s+", " ", vis).strip(), fontname="tiro", fontsize=11.0)
+            total_w = w_end + w_add
+            est_extra = int(total_w // COL_W)
+            rem_w = total_w - est_extra * COL_W
+            if butuh == 0:
+                if est_extra == 0 and 0.80 * COL_W <= rem_w <= 0.99 * COL_W:
+                    exact_ks.append(k)
+            else:
+                if est_extra == butuh and 0.76 * COL_W <= rem_w <= 0.99 * COL_W:
+                    exact_ks.append(k)
+        cands_k = []
+        for k0 in exact_ks:
+            for dk in (k0, k0 - 1, k0 + 1):
+                if 1 <= dk <= 18 and dk not in cands_k:
+                    cands_k.append(dk)
+        emitted = 0
+        for k in cands_k:
+            if tarik_kata_paragraf(teks, n1, n2, k) is not None:
+                pair_seen.add((n1, n2, butuh))
+                yield ("tarik", n1, n2, k)
+                emitted += 1
+                if emitted >= 3:
+                    break
 
 
 def ratakan_kolom(teks, body_path, workdir, laporan):
@@ -4928,13 +5264,18 @@ def calon_potong_ketat(teks, pdf, pos, u):
 
 def calon_objek_ketat(body, keputusan, pos, u):
     import copy
-    buruk = {x["hal"] for x in u["kolom"] if not kolom_sah(x, u["halaman"]) or (
-        x["kol"] == 1 and x["hal"] != u["halaman"] and x["kurang"] > ALIGN_EPS)}
-    buruk |= {t["hal"] for t in u["tunggal"]} | {g["hal"] for g in u["grid"]}
+    buruk_keras = {x["hal"] for x in u["kolom"] if not kolom_sah(x, u["halaman"])}
+    buruk_keras |= {t["hal"] for t in u["tunggal"]} | {g["hal"] for g in u["grid"]}
+    awal_c = HALAMAN_AWAL_CETAK[0] or 1
     for m_str in u.get("masalah", []):
         for h_m in re.findall(r"hlm(?: fisik)? (\d+)|Halaman (\d+)", m_str):
             h_val = int(h_m[0] or h_m[1])
-            buruk.add(h_val - HALAMAN_AWAL_CETAK[0] + 1 if h_val >= HALAMAN_AWAL_CETAK[0] and HALAMAN_AWAL_CETAK[0] > 1 else h_val)
+            h_fis = h_val - awal_c + 1 if awal_c > 1 and h_val >= awal_c else h_val
+            if 1 <= h_fis <= u["halaman"]:
+                buruk_keras.add(h_fis)
+    buruk_lunak = {x["hal"] for x in u["kolom"]
+                   if x["kol"] == 1 and x["hal"] != u["halaman"] and x["kurang"] > ALIGN_EPS}
+    buruk = buruk_keras if buruk_keras else buruk_lunak
     tambahan_k = set()
     gambar_hal = sorted(
         (pos["objek-info-" + str(k)][1], k)
@@ -4945,8 +5286,8 @@ def calon_objek_ketat(body, keputusan, pos, u):
     )
     for h_b in sorted(buruk):
         sbl = [kg for hg, kg in gambar_hal if hg < h_b]
-        if sbl:
-            tambahan_k.add(sbl[-1])
+        for kg in sbl[-2:]:
+            tambahan_k.add(kg)
     kandidat_objek = []
     for k, kp in sorted(keputusan.items()):
         blok = body[slice(*blok_objek(body, k))]
@@ -4958,6 +5299,8 @@ def calon_objek_ketat(body, keputusan, pos, u):
         kandidat_objek.append((k, kp, blok, info))
     min_buruk = min(buruk) if buruk else 0
     kandidat_objek.sort(key=lambda item: (0 if item[3][1] == min_buruk else (1 if abs(item[3][1] - min_buruk) <= 1 else (2 if item[3][1] in buruk else 3)), item[0]))
+    skala_per_k = {}
+    gambar_hal_k = {}
     for k, kp, blok, info in kandidat_objek:
         uk = ukuran_gambar(blok)
         akhir = pos.get("objek-akhir-" + str(k))
@@ -4976,7 +5319,8 @@ def calon_objek_ketat(body, keputusan, pos, u):
                 if kp.get("jenis") in ("geser", "tunda") and tgt_now
                 else valid_pms
             )
-            single_page_tbl = not (akhir and info and akhir[1] != info[1]) and tabel_baris_body(body, k) < 15
+            lintas_tbl = _tabel_lintas_sejati(body, k, info, akhir)
+            single_page_tbl = (not lintas_tbl) and tabel_baris_body(body, k) < 15
             geser_cands = []
             for nomor in ordered_pms:
                 if kp.get("jenis") != "geser" or tgt_now != nomor:
@@ -4994,9 +5338,9 @@ def calon_objek_ketat(body, keputusan, pos, u):
                     geser_cands.append(kp2)
             float_cands = []
             # FIX-TABEL-BUKAN-FLOAT: tabel selebar halaman tidak boleh menjadi float utuh
-            # jika panjang/lintas halaman. Namun tabel satu halaman boleh menjadi float "bawah" atau "atas"
-            # (mis. Table 6 float bawah untuk menghilangkan pita teks).
-            if not (akhir and info and akhir[1] != info[1]):
+            # jika panjang/lintas halaman. Namun tabel satu halaman (atau ringkas < 15 baris)
+            # boleh menjadi float "bawah" atau "atas".
+            if not _tabel_lintas_sejati(body, k, info, akhir):
                 for jns in ("bawah", "atas"):
                     if kp.get("jenis") != jns:
                         kp2 = copy.deepcopy(keputusan)
@@ -5015,6 +5359,7 @@ def calon_objek_ketat(body, keputusan, pos, u):
             continue
         skala = kp.get("skala", 1.0)
         if uk:
+            gambar_hal_k[k] = info[1]
             slot = 442.2 if objek_penuh(blok) else LEBAR_KOLOM_PT
             tinggi = float(info[0][1])
             extra = 8.0 if kp.get("jenis") in ("tunda", "atas", "bawah") else 22.0
@@ -5027,16 +5372,19 @@ def calon_objek_ketat(body, keputusan, pos, u):
             slot_asal = math.ceil((tinggi_nyata + extra) / 11.0 - 0.001)
             # Prioritaskan ambang slot grid eksak dulu, lalu persentase; deduplikasi per slot 11 pt.
             kandidat_skala = []
-            for delta in (-1, 1, -2, 2, -3, 3, -4):
+            for delta in (-1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6):
                 target = (slot_asal + delta) * 11.0
-                kandidat_skala.append(round((target - tetap - extra - 0.2) / uk[1], 3))
-            kandidat_skala.extend(sorted(
-                (round(skala * (1 + arah * persen / 100.0), 3)
-                 for persen in range(1, 4) for arah in (-1, 1)),
-                key=lambda s: abs(s - skala),
-            ))
+                kandidat_skala.append((delta, round((target - tetap - extra - 0.2) / uk[1], 3)))
+            kandidat_skala.extend(
+                (None, s_pct)
+                for s_pct in sorted(
+                    (round(skala * (1 + arah * persen / 100.0), 3)
+                     for persen in (1, 2, 3, 5, 8) for arah in (-1, 1)),
+                    key=lambda s: abs(s - skala),
+                )
+            )
             slot_terlihat = {slot_asal}
-            for s in kandidat_skala:
+            for delta_s, s in kandidat_skala:
                 if (not 0.70 <= s <= 1.20 or abs(s - skala) < 0.001
                         or uk[0] * s > slot + ALIGN_EPS
                         or (s > skala and uk[3] * 72 / (uk[0] * s) < 150)):
@@ -5045,6 +5393,8 @@ def calon_objek_ketat(body, keputusan, pos, u):
                 if slot_baru in slot_terlihat:
                     continue
                 slot_terlihat.add(slot_baru)
+                if delta_s in (-1, 1, -2, 2):
+                    skala_per_k.setdefault(k, {})[delta_s] = s
                 kp2 = copy.deepcopy(keputusan)
                 kp2[k] = dict(kp, skala=s)
                 yield kp2
@@ -5070,6 +5420,29 @@ def calon_objek_ketat(body, keputusan, pos, u):
             for mk in ("maju", "maju_hal", "lanjut"):
                 kp2[k].pop(mk, None)
             yield kp2
+    # Kombinasi perubahan ukuran simultan untuk pasangan 2 gambar (termasuk zero-sum (-1,+1))
+    k_multi = sorted(skala_per_k)
+    if len(k_multi) >= 2:
+        pasangan = []
+        for idx_a in range(len(k_multi)):
+            for idx_b in range(idx_a + 1, len(k_multi)):
+                ka, kb = k_multi[idx_a], k_multi[idx_b]
+                if abs(gambar_hal_k[ka] - gambar_hal_k[kb]) <= 1:
+                    skor_p = (abs(gambar_hal_k[ka] - min_buruk) + abs(gambar_hal_k[kb] - min_buruk), ka, kb)
+                    pasangan.append((skor_p, ka, kb))
+        if not pasangan:
+            for idx_a in range(len(k_multi) - 1):
+                ka, kb = k_multi[idx_a], k_multi[idx_a + 1]
+                pasangan.append(((abs(gambar_hal_k[ka] - min_buruk), ka, kb), ka, kb))
+        pasangan.sort()
+        for _, ka, kb in pasangan[:3]:
+            dmap1, dmap2 = skala_per_k[ka], skala_per_k[kb]
+            for d1, d2 in ((-1, 1), (1, -1), (-1, -1), (1, 1), (-2, 1), (2, -1), (-1, -2), (1, 2)):
+                if d1 in dmap1 and d2 in dmap2:
+                    kp2 = copy.deepcopy(keputusan)
+                    kp2[ka] = dict(kp2[ka], skala=dmap1[d1])
+                    kp2[kb] = dict(kp2[kb], skala=dmap2[d2])
+                    yield kp2
 
 
 
@@ -5430,8 +5803,14 @@ def lubang_kolom(pdf, pos, penuh_obj, teks=""):
                     continue
                 # FIX-LUBANG-LINTAS: halaman lanjutan objek selebar halaman juga dikecualikan;
                 # sel tabel selebar halaman tidak boleh dihitung sebagai kolom kiri/kanan.
+                # Namun objek apung satu halaman (atas/bawah/tunda, akhir=None) hanya memblokir
+                # rentang tingginya sendiri, bukan sampai dasar halaman (762.0).
+                tinggi_ob = float(info[0][1]) if isinstance(info[0], (list, tuple)) and len(info[0]) > 1 else 0.0
                 y0 = info[3] if i == h0 else 0.0
-                y1 = akhir[3] if akhir and i == h1 else 762.0
+                if akhir:
+                    y1 = akhir[3] if i == h1 else 762.0
+                else:
+                    y1 = (y0 + tinggi_ob) if tinggi_ob > 0 else 762.0
                 larangan.append((y0 - 1.0, y1 + 1.0))
 
             larangan_gabung = []
@@ -5655,7 +6034,7 @@ def sela_kandidat(grup, batas):
     return hasil
 
 
-def nilai_kandidat_layout(u, keputusan, header):
+def nilai_kandidat_layout(u, keputusan, header, cuts=()):
     buruk = [x for x in u["kolom"] if not kolom_sah(x, u["halaman"])]
     kiri_buruk = [x for x in buruk if x["kol"] == 0]
     kanan_11pt = sum(1 for x in u["kolom"]
@@ -5670,12 +6049,14 @@ def nilai_kandidat_layout(u, keputusan, header):
     # menggantung (aturan 2 lebih keras daripada kelonggaran kanan maks. 1 baris).
     keras += 999 * len(kiri_buruk)
     prefix = min((x["hal"] for x in buruk), default=u["halaman"] + 1) - 1
+    tarik_cnt = sum(1 for c in (cuts or ()) if c and c[0] == "tarik")
     # Pelanggaran wajib lebih penting daripada estetika; utamakan kolom kanan 0 pt (kanan_11pt == 0).
     return (keras, len(u["masalah"]), len(buruk),
             round(sum(abs(x["kurang"]) for x in buruk), 3),
             kanan_11pt, -prefix,
             u["halaman"], abs(header),
-            round(sum(abs(v.get("skala", 1) - 1) for v in keputusan.values()), 4))
+            round(sum(abs(v.get("skala", 1) - 1) for v in keputusan.values()), 4),
+            tarik_cnt)
 
 
 def spesifikasi_potong_layout(teks, pdf, pos, u, teks_dasar=None):
@@ -5688,11 +6069,17 @@ def spesifikasi_potong_layout(teks, pdf, pos, u, teks_dasar=None):
                 h_val = h_val - awal_c + 1
             if 1 <= h_val <= u["halaman"]:
                 tidak_sah_set.add(h_val)
-    tidak_sah = sorted(tidak_sah_set)
-    lain = sorted({x["hal"] for x in u["kolom"] if (x["kol"] == 1 and x["hal"] != u["halaman"] and x["kurang"] > ALIGN_EPS)} | {t["hal"] for t in u["tunggal"]})
-    buruk = tidak_sah + [h for h in lain if h not in tidak_sah]
-    for h in sorted({h for p in buruk[:2] for h in (p - 1, p) if h >= 1}):
-        for m in (1, 2, 3):
+    wajib = sorted(tidak_sah_set | {t["hal"] for t in u["tunggal"]})
+    lunak = sorted({x["hal"] for x in u["kolom"]
+                    if x["kol"] == 1 and x["hal"] != u["halaman"] and x["kurang"] > ALIGN_EPS})
+    buruk = wajib if wajib else lunak
+    halaman_urut = []
+    for p in buruk[:2]:
+        for h in (p - 1, p):
+            if h >= 1 and h not in halaman_urut:
+                halaman_urut.append(h)
+    for m in (1, 2, 3, 4):
+        for h in halaman_urut:
             for kol in (0, 1):
                 spec = cari_potong(pdf, pos, h, kol, m, teks, teks_dasar=teks_dasar)
                 if spec:
@@ -5766,7 +6153,7 @@ def pilih_kandidat(body_dasar, body_path, workdir, keputusan, kandidat, laporan,
             for p in pita_list:
                 if p["letak"] == "tengah":
                     tambahan.append("Pita teks terjepit {} baris di antara objek hlm fisik {} (min. {})".format(
-                        p["baris"], p["hal"], PITA_TENGAH_MIN))
+                        p["baris"], p["hal"], p.get("batas_min", PITA_TENGAH_MIN)))
                 else:
                     tambahan.append("Pita teks {} baris hlm fisik {}".format(p["baris"], p["hal"]))
             # FIX-RUANG-KOSONG-SEARCH: ruang kosong > 33 pt di bawah isi halaman juga
@@ -5779,7 +6166,7 @@ def pilih_kandidat(body_dasar, body_path, workdir, keputusan, kandidat, laporan,
             u["masalah"] = list(dict.fromkeys(u["masalah"] + tambahan))
             u["lulus"] = not u["masalah"]
             state.update(text=text, u=u, pos=pos, expanded=False,
-                         score=nilai_kandidat_layout(u, state["kp"], state["header"]))
+                         score=nilai_kandidat_layout(u, state["kp"], state["header"], cuts=state["cuts"]))
             population.append(state)
             prev_best_cnt = len(terbaik["u"]["masalah"]) if terbaik else 999
             prev_best_keras = terbaik["score"][0] if terbaik else 999
@@ -5795,16 +6182,32 @@ def pilih_kandidat(body_dasar, body_path, workdir, keputusan, kandidat, laporan,
                 break
             if u["lulus"] and "eval_lulus_pertama" not in stat:
                 stat["eval_lulus_pertama"] = evaluasi
-            # PDF ini masih milik kandidat ini: simpan spesifikasi potong sekarang.
+            # PDF ini masih milik kandidat ini: simpan spesifikasi potong & tarik kata sekarang.
             teks_tanpa_cut = (
                 susun_teks(body_dasar, state["kp"], akhir_seimbang=state.get("akhir_seimbang", False))
                 if state["cuts"] else None
             )
             state["cuts_next"] = list(spesifikasi_potong_layout(text, pdf, pos, u, teks_dasar=teks_tanpa_cut))
+            try:
+                state["tarik_next"] = list(cari_tarik_kata(pdf, pos, u, text))
+            except Exception:
+                state["tarik_next"] = []
             state["pita_moves"] = []
             for pt in pita_list:
                 if pt["letak"] in ("atas", "tengah"):
                     k2 = pt.get("bawah")
+                    I_k2 = pos.get("objek-info-{}".format(k2))
+                    A_k2 = pos.get("objek-akhir-{}".format(k2))
+                    lintas_k2 = _tabel_lintas_sejati(body_dasar, k2, I_k2, A_k2)
+                    if (pt["letak"] == "tengah" and k2 in state["kp"] and not lintas_k2
+                            and state["kp"][k2].get("jenis") != "bawah"
+                            and (not body_dasar[slice(*blok_objek(body_dasar, k2))].startswith("#tabel(")
+                                 or tabel_baris_body(body_dasar, k2) < 15)):
+                        kp_bawah = copy.deepcopy(state["kp"])
+                        kp_bawah[k2] = dict(kp_bawah[k2], jenis="bawah")
+                        for mk in ("target", "mode", "n_pm", "teks_baris", "maju", "maju_hal", "lanjut"):
+                            kp_bawah[k2].pop(mk, None)
+                        state["pita_moves"].append(kp_bawah)
                     if (k2 in state["kp"] and state["kp"][k2].get("jenis") in ("tempat", "geser")
                             and body_dasar[slice(*blok_objek(body_dasar, k2))].startswith("#tabel(")):
                         y_mulai_pt = 100.0
@@ -5836,7 +6239,7 @@ def pilih_kandidat(body_dasar, body_path, workdir, keputusan, kandidat, laporan,
         parents = unexp[:lebar]
         if lebar >= 3 and len(parents) == lebar:
             near_1 = sorted(
-                (p for p in unexp if len(p["u"]["masalah"]) == 1 and p.get("cuts_next")
+                (p for p in unexp if len(p["u"]["masalah"]) == 1 and (p.get("cuts_next") or p.get("tarik_next"))
                  and p["u"]["masalah"] != (terbaik["u"]["masalah"] if terbaik else None)),
                 key=lambda p: (p["score"][3], p["score"][0]),
             )
@@ -5857,7 +6260,7 @@ def pilih_kandidat(body_dasar, body_path, workdir, keputusan, kandidat, laporan,
             parent["expanded"] = True
             kp, cuts, header = parent["kp"], parent["cuts"], parent["header"]
             akhir = parent.get("akhir_seimbang", False)
-            cut_moves, size_by_k, place_by_k = [], {}, {}
+            cut_moves, tarik_moves, size_by_k, place_by_k = [], [], {}, {}
             for spec in parent.get("cuts_next", []):
                 if not any(old[1] == spec[1] for old in cuts):
                     cut_moves.append(node(kp, header, cuts + [spec], "potong", akhir))
@@ -5865,11 +6268,15 @@ def pilih_kandidat(body_dasar, body_path, workdir, keputusan, kandidat, laporan,
                     cuts_ganti = [spec if old[1] == spec[1] else old for old in cuts]
                     if cuts_ganti != cuts:
                         cut_moves.append(node(kp, header, cuts_ganti, "potong", akhir))
-            # Mencabut satu potongan adalah operator sah; QA mengecek paragraf lagi.
+            tarik_used = {n_t for c in cuts if c and c[0] == "tarik" for n_t in c[1:3]}
+            for spec in parent.get("tarik_next", []):
+                if spec[1] not in tarik_used and spec[2] not in tarik_used:
+                    tarik_moves.append(node(kp, header, cuts + [spec], "tarik", akhir))
+            # Mencabut satu potongan/tarik-kata adalah operator sah; QA mengecek paragraf lagi.
             for i in range(len(cuts)):
                 cut_moves.append(node(kp, header, cuts[:i] + cuts[i + 1:], "gabung", akhir))
             for kp2 in calon_objek_ketat(body_dasar, kp, parent["pos"], parent["u"]):
-                k_ubah = next((k for k in kp if kp2[k] != kp[k]), None)
+                k_ubah = tuple(k for k in kp if kp2[k] != kp[k])
                 ukuran = any(kp2[k].get("skala") != kp[k].get("skala") for k in kp)
                 by_k = size_by_k if ukuran else place_by_k
                 by_k.setdefault(k_ubah, []).append(
@@ -5891,9 +6298,9 @@ def pilih_kandidat(body_dasar, body_path, workdir, keputusan, kandidat, laporan,
                 header_moves.insert(0, node(kp, header, cuts, "akhir-seimbang", not akhir))
             kuota_p = kuota + 6 if len(parent["u"]["masalah"]) <= 2 else kuota
             op_lists = (
-                [cut_moves, place_moves, size_moves, header_moves]
-                if len(parent["u"]["masalah"]) == 1 and cut_moves
-                else [header_moves, size_moves, place_moves, cut_moves]
+                [cut_moves, tarik_moves, place_moves, size_moves, header_moves]
+                if len(parent["u"]["masalah"]) == 1 and (cut_moves or tarik_moves)
+                else [header_moves, size_moves, place_moves, cut_moves, tarik_moves]
             )
             batches.append(sela_kandidat(op_lists, kuota_p))
         if len(batches) > 1 and (
@@ -6726,7 +7133,7 @@ def main():
                     m2.append("Halaman {} hanya berisi {} baris teks per kolom di sekitar objek "
                               "(min. {})".format(a.halaman_awal + pt["hal"] - 1, pt["baris"], PITA_TOTAL_MIN))
                     continue
-                batas_pita = PITA_TENGAH_MIN if pt["letak"] == "tengah" else PITA_TEPI_MIN
+                batas_pita = pt.get("batas_min", PITA_TENGAH_MIN) if pt["letak"] == "tengah" else PITA_TEPI_MIN
                 m2.append("Pita teks hanya {} baris ({} objek, min. {}) di hlm {}".format(
                     pt["baris"], {"atas": "di atas", "bawah": "di bawah", "tengah": "di antara"}[pt["letak"]],
                     batas_pita, a.halaman_awal + pt["hal"] - 1))
