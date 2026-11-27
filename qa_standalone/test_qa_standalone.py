@@ -65,7 +65,7 @@ class TestQAStandalone(unittest.TestCase):
         p2.insert_text((76.535, 111.2), "2. Research Findings", fontname="tibo", fontsize=11)
         _add_col_lines(p2, 76.535, 122.2, 6, prefix="Findings line")
         p2.draw_rect(fitz.Rect(76.535, 200.0, 290.0, 310.0), color=(0, 0, 0), fill=(0.9, 0.9, 0.9))
-        p2.insert_text((76.535, 322.0), "Figure 1. Valid one-column chart", fontname="tiro", fontsize=9)
+        p2.insert_text((76.535, 322.0), "Figure 1. Valid one-column chart", fontname="tiro", fontsize=10)
         _add_col_lines(p2, 305.135, 111.2, 6, prefix="Closing text")
         doc.save(str(pdf_path))
         doc.close()
@@ -474,6 +474,134 @@ class TestQAStandalone(unittest.TestCase):
         report = analyze_pdf(str(pdf_path), rules=self.rules)
         orphan_hdgs = [i for i in report.issues if i.category == "orphan_heading"]
         self.assertEqual(orphan_hdgs, [], [i.to_dict() for i in orphan_hdgs])
+
+    def _build_typography_fixture(
+        self,
+        path: Path,
+        *,
+        para_font: str = "tiro",
+        para_size: float = 11.0,
+        table_font: str = "tiro",
+        table_size: float = 10.0,
+        tbl_cap_font: str = "tibo",
+        tbl_cap_size: float = 10.0,
+        fig_cap_font: str = "tiro",
+        fig_cap_size: float = 10.0,
+    ) -> None:
+        doc = fitz.open()
+        p1 = doc.new_page(width=595.28, height=841.89)
+        p1.insert_text((76.535, 111.2), "■ 1. INTRODUCTION", fontname="tibo", fontsize=11)
+        _add_col_lines(p1, 76.535, 122.2, 6, prefix="Body narrative", fontname=para_font, fontsize=para_size)
+        # Superscript inline (7 pt) dan Note. (9 pt) harus dikecualikan tanpa false positive
+        p1.insert_text((76.535, 188.2), "Value R", fontname="tiro", fontsize=11)
+        p1.insert_text((112.0, 184.5), "2", fontname="tiro", fontsize=7.0)
+        p1.insert_text((117.0, 188.2), " equals 0.95 in this model.", fontname="tiro", fontsize=11)
+        _add_col_lines(p1, 305.135, 111.2, 7, prefix="Right narrative", fontname=para_font, fontsize=para_size)
+
+        # Tabel dengan caption (2 baris uji multi-line) + kotak tabel
+        p1.insert_text((76.535, 224.0), "Table 1.", fontname=tbl_cap_font, fontsize=tbl_cap_size)
+        p1.insert_text((116.0, 224.0), "Summary of experimental results", fontname="tiro" if tbl_cap_font == "tibo" else tbl_cap_font, fontsize=tbl_cap_size)
+        p1.insert_text((76.535, 235.0), "measured across classroom groups.", fontname="tiro" if tbl_cap_font == "tibo" else tbl_cap_font, fontsize=tbl_cap_size)
+        p1.draw_rect(fitz.Rect(76.535, 242.0, 289.0, 315.0), color=(0, 0, 0), width=0.8)
+        p1.draw_line((76.535, 265.0), (289.0, 265.0), color=(0, 0, 0), width=0.8)
+        p1.draw_line((182.0, 242.0), (182.0, 315.0), color=(0, 0, 0), width=0.8)
+        p1.insert_text((82.0, 257.0), "Metric", fontname="tibo" if table_font == "tiro" else table_font, fontsize=table_size)
+        p1.insert_text((188.0, 257.0), "Score", fontname="tibo" if table_font == "tiro" else table_font, fontsize=table_size)
+        p1.insert_text((82.0, 282.0), "Group A", fontname=table_font, fontsize=table_size)
+        p1.insert_text((188.0, 282.0), "88.4", fontname=table_font, fontsize=table_size)
+        p1.insert_text((76.535, 326.0), "Note. Scores aggregated at school level.", fontname="tiro", fontsize=9.0)
+
+        # Gambar + caption gambar (juga 2 baris)
+        p1.draw_rect(fitz.Rect(305.135, 210.0, 518.0, 310.0), color=(0, 0, 0), fill=(0.9, 0.9, 0.9))
+        p1.insert_text((305.135, 324.0), "Figure 1.", fontname="tibo" if fig_cap_font == "tiro" else fig_cap_font, fontsize=fig_cap_size)
+        p1.insert_text((352.0, 324.0), "Distribution of test outcomes", fontname=fig_cap_font, fontsize=fig_cap_size)
+        p1.insert_text((305.135, 335.0), "across selected cohorts.", fontname=fig_cap_font, fontsize=fig_cap_size)
+
+        doc.save(str(path))
+        doc.close()
+
+    def test_typography_clean_standards_pass(self):
+        pdf_path = self.tmp_dir / "typo_clean.pdf"
+        self._build_typography_fixture(pdf_path)
+        report = analyze_pdf(str(pdf_path), rules=self.rules)
+        typo = [i for i in report.issues if i.category == "tipografi"]
+        self.assertEqual(typo, [], [i.to_dict() for i in typo])
+        self.assertEqual(report.status, "LULUS", [i.to_dict() for i in report.issues])
+
+    def test_typography_wrong_font_family_all_four_scopes(self):
+        pdf_path = self.tmp_dir / "typo_bad_family.pdf"
+        self._build_typography_fixture(
+            pdf_path,
+            para_font="helv",
+            table_font="cour",
+            tbl_cap_font="helv",
+            fig_cap_font="cour",
+        )
+        report = analyze_pdf(str(pdf_path), rules=self.rules)
+        typo = [i for i in report.issues if i.category == "tipografi"]
+        msgs = " | ".join(f"{i.title}: {i.message}" for i in typo).lower()
+        self.assertIn("teks paragraf", msgs)
+        self.assertIn("teks isian tabel", msgs)
+        self.assertIn("caption tabel", msgs)
+        self.assertIn("caption gambar", msgs)
+        self.assertIn("helvetica", msgs)
+        self.assertIn("courier", msgs)
+        self.assertEqual(report.status, "PERLU PERBAIKAN")
+
+    def test_typography_wrong_font_size_all_four_scopes(self):
+        for bad_para in (10.0, 12.0):
+            pdf_path = self.tmp_dir / f"typo_bad_size_{bad_para}.pdf"
+            self._build_typography_fixture(
+                pdf_path,
+                para_size=bad_para,
+                table_size=11.0,
+                tbl_cap_size=11.0,
+                fig_cap_size=9.0,
+            )
+            report = analyze_pdf(str(pdf_path), rules=self.rules)
+            typo = [i for i in report.issues if i.category == "tipografi"]
+            titles = " | ".join(i.title.lower() for i in typo)
+            self.assertIn("teks paragraf", titles, [i.to_dict() for i in typo])
+            self.assertIn("teks isian tabel", titles, [i.to_dict() for i in typo])
+            self.assertIn("caption tabel", titles, [i.to_dict() for i in typo])
+            self.assertIn("caption gambar", titles, [i.to_dict() for i in typo])
+
+    def test_typography_check_can_be_disabled(self):
+        pdf_path = self.tmp_dir / "typo_disabled.pdf"
+        self._build_typography_fixture(
+            pdf_path,
+            para_font="helv",
+            para_size=10.0,
+            table_font="cour",
+            table_size=11.0,
+            tbl_cap_font="helv",
+            tbl_cap_size=11.0,
+            fig_cap_font="cour",
+            fig_cap_size=9.0,
+        )
+        report = analyze_pdf(str(pdf_path), rules=JournalRules(check_fonts=False))
+        typo = [i for i in report.issues if i.category == "tipografi"]
+        self.assertEqual(typo, [], [i.to_dict() for i in typo])
+
+    def test_typography_inline_table_crossref_not_false_positive(self):
+        pdf_path = self.tmp_dir / "typo_inline_ref.pdf"
+        doc = fitz.open()
+        p1 = doc.new_page(width=595.28, height=841.89)
+        p1.insert_text((76.535, 111.2), "Demographic characteristics and participant scores are presented in", fontname="tiro", fontsize=11)
+        p1.insert_text((76.535, 122.2), "Table 1.", fontname="tiro", fontsize=11)
+        p1.insert_text((76.535, 144.2), "Table 1.", fontname="tibo", fontsize=10)
+        p1.insert_text((116.0, 144.2), "Summary of participant results", fontname="tiro", fontsize=10)
+        p1.draw_rect(fitz.Rect(76.535, 152.0, 289.0, 210.0), color=(0, 0, 0), width=0.8)
+        p1.draw_line((76.535, 174.0), (289.0, 174.0), color=(0, 0, 0), width=0.8)
+        p1.insert_text((82.0, 166.0), "Characteristic", fontname="tibo", fontsize=10)
+        p1.insert_text((82.0, 190.0), "Gender", fontname="tiro", fontsize=10)
+        _add_col_lines(p1, 305.135, 111.2, 8, prefix="Right col text")
+        doc.save(str(pdf_path))
+        doc.close()
+
+        report = analyze_pdf(str(pdf_path), rules=self.rules)
+        typo = [i for i in report.issues if i.category == "tipografi"]
+        self.assertEqual(typo, [], [i.to_dict() for i in typo])
 
 
 if __name__ == "__main__":

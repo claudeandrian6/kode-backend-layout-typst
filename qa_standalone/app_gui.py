@@ -64,6 +64,7 @@ class QALayoutApp:
 
         self.var_min_heading = tk.IntVar(value=2)
         self.var_check_grid = tk.BooleanVar(value=True)
+        self.var_check_fonts = tk.BooleanVar(value=True)
         self.var_show_guides = tk.BooleanVar(value=True)
         self.var_filter_cat = tk.StringVar(value="Semua Kategori")
         self.var_status_text = tk.StringVar(value="Pilih atau seret file PDF untuk mulai memeriksa.")
@@ -102,7 +103,7 @@ class QALayoutApp:
         ).pack(anchor="w")
         tk.Label(
             title_box,
-            text="Profil IMRECS A4 2 Kolom (76.5–518.7 pt | Gutter 15 pt | Grid 11 pt) — Scribus & PageMaker",
+            text="Profil IMRECS A4 2 Kolom (76.5–518.7 pt | Gutter 15 pt | Grid 11 pt | Paragraf 11 pt, Tabel & Caption 10 pt Times New Roman) — Scribus & PageMaker",
             bg="#0f172a",
             fg="#94a3b8",
             font=("Segoe UI", 9),
@@ -183,6 +184,15 @@ class QALayoutApp:
             activebackground="#e2e8f0",
             command=self._recheck,
         ).pack(side="left", padx=(10, 4))
+
+        tk.Checkbutton(
+            bar,
+            text="Cek Font (11/10 pt)",
+            variable=self.var_check_fonts,
+            bg="#e2e8f0",
+            activebackground="#e2e8f0",
+            command=self._recheck,
+        ).pack(side="left", padx=4)
 
         tk.Checkbutton(
             bar,
@@ -311,7 +321,7 @@ class QALayoutApp:
         self.canvas.create_text(
             w / 2,
             h / 2,
-            text=f"{dnd_msg}\n\nPemeriksaan Lokal (Offline):\n• Keseimbangan Kolom, Kolom Kosong & Ruang Bawah Gambar\n• Orphan Heading (Min. 2-3 Baris) & Jarak Sitasi 22 pt\n• Widow, Orphan & Pita Teks Terjepit (< 3 Baris)\n• Format Rumus (Italic, No-Indent, Spasi 11 pt)\n• Gambar / Tabel Menabrak Margin, Gutter & Objek Berurutan (3+)",
+            text=f"{dnd_msg}\n\nPemeriksaan Lokal (Offline):\n• Keseimbangan Kolom, Kolom Kosong & Ruang Bawah Gambar\n• Orphan Heading (Min. 2-3 Baris) & Jarak Sitasi 22 pt\n• Widow, Orphan & Pita Teks Terjepit (< 3 Baris)\n• Format Rumus (Italic, No-Indent, Spasi 11 pt)\n• Tipografi Font & Ukuran (Times New Roman: Paragraf 11 pt, Tabel & Caption 10 pt)\n• Gambar / Tabel Menabrak Margin, Gutter & Objek Berurutan (3+)",
             justify="center",
             fill="#334155",
             font=("Segoe UI", 11),
@@ -352,6 +362,7 @@ class QALayoutApp:
         rules = JournalRules(
             min_heading_lines=int(self.var_min_heading.get()),
             check_grid=bool(self.var_check_grid.get()),
+            check_fonts=bool(self.var_check_fonts.get()),
         )
 
         def worker() -> None:

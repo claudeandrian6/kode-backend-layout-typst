@@ -35,6 +35,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Nonaktifkan pemeriksaan keselarasan grid 11 pt.",
     )
+    parser.add_argument(
+        "--no-fonts",
+        action="store_true",
+        help="Nonaktifkan pemeriksaan jenis dan ukuran font (Paragraf 11 pt / Tabel & Caption 10 pt).",
+    )
+    parser.add_argument(
+        "--font-family",
+        default="Times New Roman",
+        help="Nama keluarga font standar yang diharapkan (default: Times New Roman).",
+    )
     return parser
 
 
@@ -49,6 +59,8 @@ def main(argv=None) -> int:
     rules = JournalRules(
         min_heading_lines=args.min_heading_lines,
         check_grid=not args.no_grid,
+        check_fonts=not args.no_fonts,
+        expected_font_family=args.font_family,
     )
     try:
         report = analyze_pdf(args.pdf_path, rules=rules)

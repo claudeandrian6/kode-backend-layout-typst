@@ -62,6 +62,7 @@ BATAS_TRACKING = (-0.4, 0.4)
 BATAS_LEBAR_GAMBAR = (20.0, 130.0)
 BATAS_SPASI = (-44.0, 132.0)
 UKURAN_TABEL = (7.0, 14.0)
+UKURAN_TABEL_BAWAAN = 10.0
 PAD_SEL = (0.0, 12.0)
 
 
@@ -246,7 +247,7 @@ def gaya_gambar_bawaan():
 
 
 def gaya_tabel_bawaan():
-    return {"span": "column", "font_size": 11.0, "breakable": None,
+    return {"span": "column", "font_size": UKURAN_TABEL_BAWAAN, "breakable": None,
             "cell_pad": 4.0, "spacing_above": 0.0, "caption": "",
             "crop": None,
             "drop_page": 0, "drop_x": None, "drop_y": None,
@@ -324,7 +325,7 @@ def normal_gaya(jenis, gaya):
     elif jenis == "table":
         if hasil.get("span") not in ("column", "page"):
             hasil["span"] = "column"
-        hasil["font_size"] = clamp(angka(hasil.get("font_size"), 11.0), *UKURAN_TABEL)
+        hasil["font_size"] = clamp(angka(hasil.get("font_size"), UKURAN_TABEL_BAWAAN), *UKURAN_TABEL)
         hasil["cell_pad"] = clamp(angka(hasil.get("cell_pad"), 4.0), *PAD_SEL)
         hasil["spacing_above"] = clamp(angka(hasil.get("spacing_above"), 0.0), *BATAS_SPASI)
         if hasil.get("breakable") not in (True, False, None):
@@ -1326,7 +1327,7 @@ def blok_dari_parse(parsed, lama=None):
             label, isi = label_dari_caption(b.get("caption_raw", ""), b.get("label_raw", ""))
             style["caption"] = (label + (" " + isi if isi else "")).strip()
             style["span"] = "page" if b.get("penuh") else "column"
-            style["font_size"] = 11.0
+            style["font_size"] = UKURAN_TABEL_BAWAAN
             crop_args = _crop_dari_args(b.get("panggil", {}).get("args"))
             if crop_args:
                 style["crop"] = crop_args
@@ -1661,8 +1662,8 @@ def _prefiks_gaya_tabel(blok):
     """Set-rule mikro tabel yang tidak lagi menjadi parameter #tabel template."""
     st = normal_gaya("table", blok.get("style"))
     aturan = []
-    fs = angka(st.get("font_size"), 11.0)
-    if abs(fs - 11.0) > 0.0005:
+    fs = angka(st.get("font_size"), UKURAN_TABEL_BAWAAN)
+    if abs(fs - UKURAN_TABEL_BAWAAN) > 0.0005:
         aturan.append("#set text(%s)" % fmt_pt(fs))
     pad = angka(st.get("cell_pad"), 4.0)
     if abs(pad - 4.0) > 0.0005:

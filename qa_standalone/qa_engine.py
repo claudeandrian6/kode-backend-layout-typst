@@ -25,6 +25,24 @@ RE_CAPTION = re.compile(
     r"^(?:Table|Tabel|Figure|Gambar|Fig\.|Chart|Graph|Source|Sumber)\s*\d*[\.:]?",
     re.I,
 )
+RE_TABLE_CAP_START = re.compile(
+    r"^(?:Table|Tabel|Tab\.)\s*\d+[A-Za-z]?\s*[\.:](?:\s|$)",
+    re.I,
+)
+RE_TABLE_CAP_LOOSE = re.compile(
+    r"^(?:Table|Tabel|Tab\.)\s*\d+[A-Za-z]?\b",
+    re.I,
+)
+RE_FIG_CAP_START = re.compile(
+    r"^(?:Figure|Gambar|Fig\.|Chart|Graph)\s*\d+[A-Za-z]?\s*[\.:](?:\s|$)",
+    re.I,
+)
+RE_FIG_CAP_LOOSE = re.compile(
+    r"^(?:Figure|Gambar|Fig\.|Chart|Graph)\s*\d+[A-Za-z]?\b",
+    re.I,
+)
+RE_OBJ_NOTE = re.compile(r"^(?:Notes?|Catatan|Sources?|Sumber)\s*[\.:]", re.I)
+RE_PDF_SUBSET_PREFIX = re.compile(r"^[A-Z]{6}\+")
 RE_PAGE_NUM_ONLY = re.compile(r"^\d{1,4}$")
 RE_CITE_OR_HDR = re.compile(
     r"^(?:To cite this article:|This is an open access article|ABSTRACT\b|Keywords?:|ISSN:|Homepage:)",
@@ -65,6 +83,8 @@ class TextLine:
     column: int = -1  # 0 = kiri, 1 = kanan, -1 = tengah/lebar penuh
     italic_alpha_ratio: float = 0.0
     has_math_font: bool = False
+    font_name: str = ""
+    spans: Tuple[Dict[str, Any], ...] = ()
 
     @property
     def bbox(self) -> Tuple[float, float, float, float]:
@@ -92,6 +112,155 @@ class VisualObject:
     @property
     def height(self) -> float:
         return self.y1 - self.y0
+
+
+_EXEMPT_MATH_TOKENS = (
+    "math",
+    "symbol",
+    "stix",
+    "cmmi",
+    "cmsy",
+    "cmex",
+    "mtex",
+    "euclidmath",
+    "cambriamath",
+    "dejavumath",
+    "newcomputermodernmath",
+    "wingdings",
+    "webdings",
+    "zapfdingbats",
+    "dingbat",
+)
+_RE_MTE_FONT = re.compile(r"^mte[a-z0-9]{0,3}$", re.I)
+_RE_STYLE_TOKENS = (
+    "-bolditalic",
+    "-italicbold",
+    "-bold",
+    "-italic",
+    "-oblique",
+    "-slant",
+    "-regular",
+    "-roman",
+    "-medium",
+    "-semibold",
+    "-demibold",
+    "-light",
+    "-condensed",
+    "-regu",
+    "-ital",
+    "psmt",
+    "mtstd",
+    "bolditalic",
+    "italicbold",
+    "bold",
+    "italic",
+    "oblique",
+    "slant",
+    "regular",
+    "medium",
+    "semibold",
+    "demibold",
+    "light",
+    "condensed",
+    "std",
+    "pro",
+    "ps",
+    "mt",
+    "lt",
+    "ce",
+)
+_TIMES_FAMILY_ALIASES = {
+    "timesnewroman",
+    "timesnewromanps",
+    "timesnewromanpsmt",
+    "timesnewromanmt",
+    "timesnewromanmtstd",
+    "times",
+    "timesroman",
+    "timeslt",
+    "timesltstd",
+    "timesce",
+    "tiro",
+    "tibo",
+    "tiit",
+    "tibi",
+    "texgyretermes",
+    "liberationserif",
+    "nimbusroman",
+    "nimbusromno9l",
+    "tinos",
+}
+
+
+def _clean_pdf_font_name(raw_font: str) -> str:
+    cleaned = RE_PDF_SUBSET_PREFIX.sub("", str(raw_font or "").strip())
+    return cleaned or "Unknown"
+
+
+def _is_exempt_math_font(raw_font: str) -> bool:
+    clean = _clean_pdf_font_name(raw_font).lower()
+    if not clean or clean == "unknown":
+        return False
+    norm = re.sub(r"[^a-z0-9]", "", clean)
+    if any(tok in norm for tok in _EXEMPT_MATH_TOKENS):
+        return True
+    return bool(_RE_MTE_FONT.match(norm))
+
+
+def _strip_font_style_suffixes(name: str) -> str:
+    cur = name.strip()
+    if "," in cur:
+        cur = cur.split(",", 1)[0].strip()
+    changed = True
+    while changed and cur:
+        changed = False
+        cur_l = cur.lower()
+        for suf in _RE_STYLE_TOKENS:
+            if cur_l.endswith(suf) and len(cur) > len(suf):
+                cand = cur[: len(cur) - len(suf)].rstrip("-_ ")
+                if cand:
+                    cur = cand
+                    changed = True
+                    break
+    return cur
+
+
+def _canonical_font_family(raw_font: str) -> str:
+    base = _strip_font_style_suffixes(_clean_pdf_font_name(raw_font))
+    norm = re.sub(r"[^a-z0-9]", "", base.lower())
+    if norm in _TIMES_FAMILY_ALIASES or norm.startswith(
+        ("timesnewroman", "timesroman", "texgyretermes", "liberationserif", "nimbusroman", "nimbusromno9l")
+    ):
+        return "timesnewroman"
+    return norm
+
+
+def _font_matches_expected(raw_font: str, expected_family: str) -> bool:
+    cand = _canonical_font_family(raw_font)
+    exp = _canonical_font_family(expected_family)
+    if not cand or cand == "unknown":
+        return False
+    if cand == exp:
+        return True
+    # Kecocokan parsial aman untuk varian nama keluarga khusus yang mengandung root diharapkan
+    return len(exp) >= 6 and (cand.startswith(exp) or exp.startswith(cand))
+
+
+def _display_font_family(raw_font: str) -> str:
+    clean = _clean_pdf_font_name(raw_font)
+    base = _strip_font_style_suffixes(clean)
+    low = re.sub(r"[^a-z0-9]", "", base.lower())
+    if low in ("tiro", "tibo", "tiit", "tibi"):
+        return "Times-Roman"
+    if low.startswith("timesnewroman"):
+        return "Times New Roman"
+    if low == "arialmt":
+        return "Arial"
+    if low in ("hebo", "hvbo", "helv"):
+        return "Helvetica"
+    if low in ("cour", "cobo", "coit", "cobi"):
+        return "Courier"
+    return base or clean
 
 
 def _span_is_bold(span: Dict[str, Any]) -> bool:
@@ -189,6 +358,7 @@ def _extract_raw_spans(page: Any, page_num: int) -> List[Dict[str, Any]]:
                         "y1": float(bbox[3]),
                         "y_base": float(origin[1]),
                         "size": float(sp.get("size", 0.0)),
+                        "font": str(sp.get("font", "") or ""),
                         "bold": _span_is_bold(sp),
                         "italic": _span_is_italic(sp),
                         "math_font": _span_is_math_font(sp),
@@ -262,6 +432,20 @@ def _extract_text_lines(page: Any, page_num: int, rules: JournalRules) -> List[T
             x1 = max(s["x1"] for s in grp)
             y1 = max(s["y1"] for s in grp)
             y_base = sum(s["y_base"] * w for s, w in zip(grp, non_ws_len)) / tot_chars
+            font_weights: Counter = Counter()
+            fallback_weights: Counter = Counter()
+            for sp_item, w_sp in zip(grp, non_ws_len):
+                f_raw = str(sp_item.get("font", "") or "")
+                alnum_w = sum(1 for ch in sp_item["text"] if ch.isalnum())
+                if alnum_w > 0 and not _is_exempt_math_font(f_raw):
+                    font_weights[f_raw] += alnum_w
+                elif f_raw:
+                    fallback_weights[f_raw] += w_sp
+            dom_font = (
+                font_weights.most_common(1)[0][0]
+                if font_weights
+                else (fallback_weights.most_common(1)[0][0] if fallback_weights else "")
+            )
             lines.append(
                 TextLine(
                     page=page_num,
@@ -277,6 +461,8 @@ def _extract_text_lines(page: Any, page_num: int, rules: JournalRules) -> List[T
                     column=_assign_column(x0, x1, rules),
                     italic_alpha_ratio=italic_ratio,
                     has_math_font=has_math,
+                    font_name=dom_font,
+                    spans=tuple(grp),
                 )
             )
     return lines
@@ -507,7 +693,7 @@ def _extract_visual_objects(
 def _is_caption_line(ln: TextLine, objects: List[VisualObject], body_size: float) -> bool:
     if RE_CAPTION.match(ln.text) and (ln.is_bold or ln.size <= body_size - 0.3):
         return True
-    if ln.size <= body_size - 1.2:
+    if ln.size <= body_size - 0.6:
         for obj in objects:
             if abs(ln.y0 - obj.y1) <= 28.0 or abs(obj.y0 - ln.y1) <= 28.0:
                 if _bbox_intersects((ln.x0, ln.y0 - 28.0, ln.x1, ln.y1 + 28.0), obj.bbox):
@@ -805,6 +991,398 @@ def _check_equations_in_segment(
                 )
 
     return issues, eq_indices
+
+
+def _is_superscript_or_subscript_span(sp: Dict[str, Any], line: TextLine) -> bool:
+    txt = str(sp.get("text", "") or "").strip()
+    sz = float(sp.get("size", 0.0))
+    if sz <= 7.8 and len(txt) <= 6:
+        max_sz = max((float(s.get("size", 0.0)) for s in line.spans), default=line.size)
+        if max_sz - sz >= 2.0 or abs(float(sp.get("y_base", line.y_base)) - line.y_base) >= 1.2:
+            return True
+    return False
+
+
+def _collect_span_typography_violations(
+    target_lines: List[TextLine],
+    expected_family: str,
+    expected_size: float,
+    size_tol: float,
+) -> Tuple[Counter, List[TextLine], Counter, List[TextLine]]:
+    wrong_fonts: Counter = Counter()
+    wrong_font_lines: List[TextLine] = []
+    wrong_sizes: Counter = Counter()
+    wrong_size_lines: List[TextLine] = []
+
+    for ln in target_lines:
+        spans = ln.spans or (
+            {
+                "text": ln.text,
+                "size": ln.size,
+                "y_base": ln.y_base,
+                "font": ln.font_name,
+            },
+        )
+        has_valid_font_text = any(
+            sum(1 for ch in str(s.get("text", "")) if ch.isalnum()) >= 2
+            and not _is_exempt_math_font(str(s.get("font", "") or ""))
+            and _font_matches_expected(str(s.get("font", "") or ""), expected_family)
+            for s in spans
+        )
+        line_bad_font = False
+        line_bad_size = False
+        for sp in spans:
+            raw_txt = str(sp.get("text", "") or "")
+            alnums = [ch for ch in raw_txt if ch.isalnum()]
+            alnum_cnt = len(alnums)
+            if alnum_cnt == 0:
+                continue
+            raw_font = str(sp.get("font", "") or ln.font_name or "")
+            if _is_exempt_math_font(raw_font):
+                continue
+            if _is_superscript_or_subscript_span(sp, ln):
+                continue
+            sz = float(sp.get("size", ln.size))
+            if abs(sz - expected_size) > size_tol:
+                wrong_sizes[round(sz, 1)] += alnum_cnt
+                line_bad_size = True
+            # Lewati 1 glif simbol/Yunani non-ASCII terisolasi jika baris lain berfont benar
+            alnum_str = "".join(alnums)
+            if has_valid_font_text and alnum_cnt == 1 and not alnum_str.isascii():
+                continue
+            if not _font_matches_expected(raw_font, expected_family):
+                wrong_fonts[_display_font_family(raw_font)] += alnum_cnt
+                line_bad_font = True
+
+        if line_bad_font:
+            wrong_font_lines.append(ln)
+        if line_bad_size:
+            wrong_size_lines.append(ln)
+
+    return wrong_fonts, wrong_font_lines, wrong_sizes, wrong_size_lines
+
+
+def _horiz_overlap(a0: float, a1: float, b0: float, b1: float, pad: float = 8.0) -> bool:
+    return not (a1 < b0 - pad or a0 > b1 + pad)
+
+
+def _group_bbox(lines: List[TextLine]) -> Tuple[float, float, float, float]:
+    return (
+        min(l.x0 for l in lines),
+        min(l.y0 for l in lines),
+        max(l.x1 for l in lines),
+        max(l.y1 for l in lines),
+    )
+
+
+def _check_typography_on_page(
+    page: Any,
+    page_num: int,
+    lines: List[TextLine],
+    objects: List[VisualObject],
+    header_rule_y: Optional[float],
+    footer_rule_y: Optional[float],
+    footnote_y: Optional[float],
+    body_top: float,
+    body_size: float,
+    rules: JournalRules,
+) -> List[Issue]:
+    """Periksa kesesuaian jenis font dan ukuran font pada Paragraf, Isian Tabel, Caption Tabel, dan Caption Gambar."""
+    eff_top = rules.margin_top if page_num >= 2 else body_top
+    sorted_lines = sorted(lines, key=lambda l: (round(l.y_base, 1), l.x0))
+
+    excluded_ids: set = set()
+    for ln in sorted_lines:
+        txt = ln.text.strip()
+        if _is_header_or_footer_line(ln, page_num, body_top, header_rule_y, footer_rule_y, rules):
+            excluded_ids.add(id(ln))
+        elif page_num >= 2 and ln.y1 <= rules.margin_top - 1.5:
+            excluded_ids.add(id(ln))
+        elif footnote_y is not None and ln.y_base > footnote_y - 2.0:
+            excluded_ids.add(id(ln))
+        elif RE_PAGE_NUM_ONLY.match(txt):
+            excluded_ids.add(id(ln))
+
+    # Kecualikan baris catatan objek "Note." / "Source:" (standar 9 pt) beserta lanjutannya
+    for idx, ln in enumerate(sorted_lines):
+        if id(ln) in excluded_ids:
+            continue
+        if RE_OBJ_NOTE.match(ln.text.strip()) and ln.size <= 9.6:
+            excluded_ids.add(id(ln))
+            prev = ln
+            for nxt in sorted_lines[idx + 1 :]:
+                if id(nxt) in excluded_ids:
+                    continue
+                if nxt.column != prev.column and not _horiz_overlap(prev.x0, prev.x1, nxt.x0, nxt.x1):
+                    continue
+                dy = nxt.y_base - prev.y_base
+                if 0.0 <= dy <= 14.0 and nxt.size <= 9.6 and not RE_CAPTION.match(nxt.text.strip()):
+                    excluded_ids.add(id(nxt))
+                    prev = nxt
+                elif dy > 14.0:
+                    break
+
+    table_objs = [o for o in objects if o.kind == "table"]
+    image_like_objs = [o for o in objects if o.kind in ("image", "vector")]
+
+    # Kumpulkan baris caption tabel & gambar beserta baris lanjutannya
+    table_cap_groups: List[List[TextLine]] = []
+    fig_cap_groups: List[List[TextLine]] = []
+    caption_line_ids: set = set()
+
+    def _collect_caption_block(start_idx: int, cap_kind: str) -> List[TextLine]:
+        head = sorted_lines[start_idx]
+        grp = [head]
+        caption_line_ids.add(id(head))
+        prev = head
+        stop_y = min(
+            (o.y0 for o in objects if o.y0 >= head.y0 - 2.0 and _horiz_overlap(head.x0, head.x1, o.x0, o.x1)),
+            default=1e9,
+        )
+        for nxt in sorted_lines[start_idx + 1 :]:
+            if id(nxt) in excluded_ids or id(nxt) in caption_line_ids:
+                continue
+            if any(_bbox_intersects(nxt.bbox, o.bbox, pad=1.5) for o in objects):
+                continue
+            if cap_kind == "table" and nxt.y1 > stop_y + 2.0:
+                continue
+            if nxt.column != prev.column and not _horiz_overlap(head.x0, head.x1, nxt.x0, nxt.x1):
+                continue
+            dy = nxt.y_base - prev.y_base
+            if dy < -1.0:
+                continue
+            if dy > max(14.5, prev.size * 1.40):
+                break
+            nxt_txt = nxt.text.strip()
+            if RE_CAPTION.match(nxt_txt) or RE_OBJ_NOTE.match(nxt_txt) or _is_heading_line(nxt, body_size):
+                break
+            if abs(nxt.size - prev.size) > 0.65:
+                break
+            if nxt.x0 - prev.x0 > 18.0:
+                break
+            grp.append(nxt)
+            caption_line_ids.add(id(nxt))
+            prev = nxt
+        return grp
+
+    def _is_inline_crossref_line(ln: TextLine, idx: int, cap_re: re.Pattern) -> bool:
+        if ln.spans and ln.spans[0].get("bold"):
+            return False
+        txt_s = ln.text.strip()
+        rest = cap_re.sub("", txt_s, count=1).strip()
+        if not rest:
+            return True
+        for prev in reversed(sorted_lines[:idx]):
+            if prev.column != ln.column:
+                continue
+            dy = ln.y_base - prev.y_base
+            if 0.5 < dy <= 14.5 and abs(ln.size - prev.size) <= 0.4:
+                if not prev.text.rstrip().endswith((".", "!", "?", ":", ";", ")", "]", '"', "”")):
+                    return True
+            break
+        return False
+
+    for idx, ln in enumerate(sorted_lines):
+        if id(ln) in excluded_ids or id(ln) in caption_line_ids:
+            continue
+        if ln.y0 < eff_top - 4.0:
+            continue
+        if any(_bbox_intersects(ln.bbox, o.bbox, pad=1.0) for o in table_objs):
+            continue
+        txt = ln.text.strip()
+        first_bold = bool(ln.spans and ln.spans[0].get("bold"))
+
+        is_tbl_cap = bool(RE_TABLE_CAP_START.match(txt)) and not _is_inline_crossref_line(ln, idx, RE_TABLE_CAP_START)
+        if not is_tbl_cap and RE_TABLE_CAP_LOOSE.match(txt):
+            near_tbl_below = any(
+                -4.0 <= (o.y0 - ln.y1) <= 34.0 and _horiz_overlap(ln.x0, ln.x1, o.x0, o.x1)
+                for o in objects
+                if o.kind in ("table", "vector")
+            )
+            if near_tbl_below and (first_bold or ln.size <= body_size - 0.3 or ln.column == -1):
+                is_tbl_cap = not _is_inline_crossref_line(ln, idx, RE_TABLE_CAP_LOOSE)
+        if is_tbl_cap:
+            table_cap_groups.append(_collect_caption_block(idx, "table"))
+            continue
+
+        is_fig_cap = bool(RE_FIG_CAP_START.match(txt)) and not _is_inline_crossref_line(ln, idx, RE_FIG_CAP_START)
+        if not is_fig_cap and RE_FIG_CAP_LOOSE.match(txt):
+            near_fig = any(
+                (-4.0 <= (ln.y0 - o.y1) <= 34.0 or -4.0 <= (o.y0 - ln.y1) <= 34.0)
+                and _horiz_overlap(ln.x0, ln.x1, o.x0, o.x1)
+                for o in image_like_objs
+            )
+            if near_fig and (first_bold or ln.size <= body_size - 0.3 or ln.column == -1):
+                is_fig_cap = not _is_inline_crossref_line(ln, idx, RE_FIG_CAP_LOOSE)
+        if is_fig_cap:
+            fig_cap_groups.append(_collect_caption_block(idx, "figure"))
+
+    # Tentukan wilayah kotak tabel (VisualObject tabel + vector ber-caption tabel + fallback rule tabel)
+    table_boxes: List[Tuple[float, float, float, float]] = [o.bbox for o in table_objs]
+    for cap_grp in table_cap_groups:
+        cap_box = _group_bbox(cap_grp)
+        for o in objects:
+            if o.kind == "vector" and -4.0 <= (o.y0 - cap_box[3]) <= 36.0 and _horiz_overlap(cap_box[0], cap_box[2], o.x0, o.x1):
+                if not any(_bbox_intersects(o.bbox, tb, pad=2.0) for tb in table_boxes):
+                    table_boxes.append(o.bbox)
+
+    # Fallback tabel booktabs tanpa kotak vektor terdeteksi
+    horiz_rules: List[Tuple[float, float, float]] = []
+    for d in page.get_drawings():
+        r = d.get("rect")
+        if r is not None and r.height < 2.5 and r.width >= 60.0:
+            horiz_rules.append((float(r.x0), float(r.y0), float(r.x1)))
+    for cap_grp in table_cap_groups:
+        cap_box = _group_bbox(cap_grp)
+        has_box_below = any(
+            -4.0 <= (tb[1] - cap_box[3]) <= 40.0 and _horiz_overlap(cap_box[0], cap_box[2], tb[0], tb[2])
+            for tb in table_boxes
+        )
+        if not has_box_below:
+            cands = [hr for hr in horiz_rules if 0.0 <= hr[1] - cap_box[3] <= 25.0 and _horiz_overlap(cap_box[0], cap_box[2], hr[0], hr[2])]
+            if cands:
+                top_r = min(cands, key=lambda h: h[1])
+                bot_cands = [hr for hr in horiz_rules if hr[1] > top_r[1] + 10.0 and _horiz_overlap(top_r[0], top_r[2], hr[0], hr[2], pad=4.0)]
+                if bot_cands:
+                    bot_r = max(bot_cands, key=lambda h: h[1])
+                    if bot_r[1] - top_r[1] <= 500.0:
+                        table_boxes.append((min(top_r[0], bot_r[0]), top_r[1], max(top_r[2], bot_r[2]), bot_r[1]))
+
+    table_line_groups: List[List[TextLine]] = [[] for _ in table_boxes]
+    table_line_ids: set = set()
+    for ln in sorted_lines:
+        if id(ln) in excluded_ids or id(ln) in caption_line_ids:
+            continue
+        for tidx, tb in enumerate(table_boxes):
+            if _bbox_intersects(ln.bbox, tb, pad=2.0):
+                table_line_groups[tidx].append(ln)
+                table_line_ids.add(id(ln))
+                break
+
+    # Baris di dalam grafik/chart/kotak non-tabel dikecualikan dari cek teks paragraf
+    non_table_obj_boxes = [
+        o.bbox for o in objects if o.kind in ("image", "vector") and not any(_bbox_intersects(o.bbox, tb, pad=2.0) for tb in table_boxes)
+    ]
+
+    para_cols: Dict[int, List[TextLine]] = {0: [], 1: []}
+    for ln in sorted_lines:
+        if id(ln) in excluded_ids or id(ln) in caption_line_ids or id(ln) in table_line_ids:
+            continue
+        if ln.y0 < eff_top - 3.0:
+            continue
+        if ln.column not in (0, 1):
+            continue
+        if any(_bbox_intersects(ln.bbox, ob, pad=1.5) for ob in non_table_obj_boxes):
+            continue
+        if _is_equation_line(ln, body_size):
+            continue
+        para_cols[ln.column].append(ln)
+
+    issues: List[Issue] = []
+
+    def _emit_scope_issues(
+        target_lines: List[TextLine],
+        scope_label: str,
+        expected_sz: float,
+        min_chars: int,
+        col: Optional[int],
+        suggestion_text: str,
+    ) -> None:
+        if not target_lines:
+            return
+        wf, wf_lns, ws, ws_lns = _collect_span_typography_violations(
+            target_lines,
+            rules.expected_font_family,
+            expected_sz,
+            rules.font_size_tol,
+        )
+        if sum(wf.values()) >= min_chars and wf_lns:
+            found_fonts = ", ".join(name for name, _ in wf.most_common(3))
+            preview = wf_lns[0].text.strip()[:50]
+            issues.append(
+                Issue(
+                    page=page_num,
+                    category="tipografi",
+                    severity="error",
+                    title=f"Jenis font {scope_label} tidak sesuai ({found_fonts})",
+                    message=(
+                        f"{scope_label.capitalize()} pada {len(wf_lns)} baris memakai font {found_fonts}, "
+                        f"seharusnya {rules.expected_font_family} (contoh: \"{preview}\")."
+                    ),
+                    suggestion=suggestion_text,
+                    bbox=_group_bbox(wf_lns),
+                    column=col,
+                )
+            )
+        if sum(ws.values()) >= min_chars and ws_lns:
+            found_sizes = ", ".join(f"{sz:.1f} pt" for sz, _ in ws.most_common(3))
+            preview = ws_lns[0].text.strip()[:50]
+            issues.append(
+                Issue(
+                    page=page_num,
+                    category="tipografi",
+                    severity="error",
+                    title=f"Ukuran font {scope_label} tidak sesuai ({found_sizes}; wajib {expected_sz:.0f} pt)",
+                    message=(
+                        f"{scope_label.capitalize()} pada {len(ws_lns)} baris berukuran {found_sizes}, "
+                        f"seharusnya {expected_sz:.0f} pt (contoh: \"{preview}\")."
+                    ),
+                    suggestion=suggestion_text,
+                    bbox=_group_bbox(ws_lns),
+                    column=col,
+                )
+            )
+
+    for col_id in (0, 1):
+        col_name = "kiri" if col_id == 0 else "kanan"
+        _emit_scope_issues(
+            para_cols[col_id],
+            f"teks paragraf (kolom {col_name})",
+            rules.body_font_size,
+            3,
+            col_id,
+            f"Atur Paragraph Style teks paragraf di Scribus/PageMaker ke {rules.expected_font_family} ukuran {rules.body_font_size:.0f} pt.",
+        )
+
+    for grp in table_line_groups:
+        if not grp:
+            continue
+        cols_in = {l.column for l in grp if l.column in (0, 1)}
+        col_val = next(iter(cols_in)) if len(cols_in) == 1 else None
+        _emit_scope_issues(
+            grp,
+            "teks isian tabel",
+            rules.table_font_size,
+            3,
+            col_val,
+            f"Atur teks isi tabel menjadi {rules.expected_font_family} ukuran tepat {rules.table_font_size:.0f} pt.",
+        )
+
+    for grp in table_cap_groups:
+        cols_in = {l.column for l in grp if l.column in (0, 1)}
+        col_val = next(iter(cols_in)) if len(cols_in) == 1 else None
+        _emit_scope_issues(
+            grp,
+            "caption tabel",
+            rules.table_caption_font_size,
+            2,
+            col_val,
+            f"Atur caption tabel menjadi {rules.expected_font_family} ukuran tepat {rules.table_caption_font_size:.0f} pt.",
+        )
+
+    for grp in fig_cap_groups:
+        cols_in = {l.column for l in grp if l.column in (0, 1)}
+        col_val = next(iter(cols_in)) if len(cols_in) == 1 else None
+        _emit_scope_issues(
+            grp,
+            "caption gambar",
+            rules.figure_caption_font_size,
+            2,
+            col_val,
+            f"Atur caption gambar menjadi {rules.expected_font_family} ukuran tepat {rules.figure_caption_font_size:.0f} pt.",
+        )
+
+    return issues
 
 
 def analyze_pdf(pdf_path: str, rules: Optional[JournalRules] = None) -> QAReport:
@@ -1354,6 +1932,23 @@ def analyze_pdf(pdf_path: str, rules: Optional[JournalRules] = None) -> QAReport
                         )
                     )
 
+            font_issue_count = 0
+            if rules.check_fonts:
+                typo_issues = _check_typography_on_page(
+                    pd["page_obj"],
+                    page_num,
+                    lines,
+                    objects,
+                    header_rule_y,
+                    footer_rule_y,
+                    footnote_y,
+                    body_top,
+                    body_size,
+                    rules,
+                )
+                issues.extend(typo_issues)
+                font_issue_count = len(typo_issues)
+
             page_metrics.append(
                 {
                     "page": page_num,
@@ -1363,6 +1958,7 @@ def analyze_pdf(pdf_path: str, rules: Optional[JournalRules] = None) -> QAReport
                     "right_bottom": round(max((l.y_base for l in page_col1_lines), default=0.0), 1),
                     "objects": len(objects),
                     "off_grid_lines": off_grid_count,
+                    "font_issues": font_issue_count,
                 }
             )
 

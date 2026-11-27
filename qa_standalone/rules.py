@@ -18,6 +18,7 @@ CATEGORY_LABELS: Dict[str, str] = {
     "jarak_sitasi": "Jarak Sitasi & Header",
     "grid": "Ketidakselarasan Grid 11 pt",
     "pita_teks": "Pita Teks Terjepit",
+    "tipografi": "Font & Ukuran Teks",
 }
 
 SEVERITY_LABELS: Dict[str, str] = {
@@ -74,6 +75,13 @@ class JournalRules:
     cite_to_intro_pt: float = 22.0
     cite_to_intro_tol: float = 3.5
     max_consecutive_objects: int = 2
+    # Standar tipografi (jenis & ukuran font)
+    check_fonts: bool = True
+    expected_font_family: str = "Times New Roman"
+    table_font_size: float = 10.0
+    table_caption_font_size: float = 10.0
+    figure_caption_font_size: float = 10.0
+    font_size_tol: float = 0.45
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

@@ -478,8 +478,8 @@
   align(center, badan)
 }
 
-// FIX-TABEL-11: isi tabel = ukuran font narasi
-#let UKURAN-TABEL = 11pt
+// FIX-TABEL-10: standar ukuran teks isian tabel = 10 pt (seragam dengan caption tabel & gambar)
+#let UKURAN-TABEL = 10pt
 #let BATAS-TINGGI = 450pt   // sisakan ruang untuk keterangan
 // FIX-TABEL-KECIL-UTUH: tabel pendek (<= separuh area teks 660 pt) tidak boleh dipotong;
 // seluruh blok (keterangan + tabel) dipindah utuh ke kolom/halaman berikutnya.

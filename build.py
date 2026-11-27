@@ -136,6 +136,7 @@ CHART_LEBAR = {}                # FIX-UKURAN-CHART: nama png chart -> lebar tamp
 CHART_EFEKTIF = {}              # FIX-QA-CHART: nama png chart -> ukuran teks efektif (pt)
 CHART_EFEKTIF_SKALA = set()     # FIX-QA-CHART: chart yang skala objeknya sudah diterapkan
 UKURAN_NARASI_PT = 11.0
+UKURAN_TABEL_PT = 10.0
 
 
 def edisi_jurnal(cfg_path, nomor):
@@ -2280,8 +2281,8 @@ def _soft_hyphen_ast(x):
             _soft_hyphen_ast(v)
 
 
-def lebar_isi_tabel(tabel_list, ukuran=11.0, inset=11.0):
-    """FIX-TABEL-ISI: (lebar alami, lebar minimum) tabel pandoc dalam pt untuk font narasi:
+def lebar_isi_tabel(tabel_list, ukuran=UKURAN_TABEL_PT, inset=11.0):
+    """FIX-TABEL-ISI: (lebar alami, lebar minimum) tabel pandoc dalam pt untuk font isi tabel (10 pt):
     alami = jumlah lebar teks terpanjang tiap kolom (tanpa pemecahan baris), minimum = jumlah
     lebar kata terpanjang tiap kolom. Sel gabungan (colspan > 1) diabaikan. None bila gagal."""
     try:

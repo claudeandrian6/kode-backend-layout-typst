@@ -360,7 +360,7 @@ class LayoutFixesTest(unittest.TestCase):
                 '#import "/template_jurnal.typ": *\n'
                 "#kolom[\n"
                 "#pm(1);" + ("Introductory sentence before table on the first page. " * 100) + "#pe(1)\n\n"
-                "#pm(2);" + ("Second paragraph filling the page right up to the compact table. " * 48) + "#pe(2)\n\n"
+                "#pm(2);" + ("Second paragraph filling the page right up to the compact table. " * 50) + "#pe(2)\n\n"
                 "]\n"
                 '#tabel(jumlah-kolom: 2, penuh: true, kepala: 2, di-tempat: true, keputusan: "@K1@", label: [Table 1.], isi: [Compact table])[\n'
                 "#table(\n"
@@ -787,6 +787,95 @@ class LayoutFixesTest(unittest.TestCase):
         self.assertIn('keputusan: "bawah", nomor: 2', res)
         self.assertLess(res.index('nomor: 1'), res.index("#pm(2);"))
         self.assertLess(res.index('nomor: 2'), res.index("#pm(2);"))
+
+    def test_table_body_and_captions_render_exact_10pt_on_11pt_grid(self):
+        import editor_blok
+        from PIL import Image
+
+        self.assertEqual(engine.UKURAN_TABEL_PT, 10.0)
+        self.assertEqual(editor_blok.gaya_tabel_bawaan()["font_size"], 10.0)
+
+        with tempfile.TemporaryDirectory(dir=BASE, prefix="test-font10-") as td:
+            td_p = Path(td)
+            rel_td = td_p.relative_to(BASE).as_posix()
+            img_path = td_p / "sample_fig.png"
+            Image.new("RGB", (200, 100), color=(210, 220, 230)).save(img_path)
+
+            body = (
+                '#import "/template_jurnal.typ": *\n'
+                "#kolom[\n"
+                "#pm(1);First narrative body line " + ("word " * 30) + "#pe(1)\n\n"
+                '#tabel(jumlah-kolom: 2, penuh: true, di-tempat: true, keputusan: "tempat", nomor: 1, label: [Table 1.], isi: [Table caption sample])[\n'
+                "#table(\n  columns: (200pt, 200pt),\n  [HeaderAlpha], [HeaderBeta],\n  [CellAlpha], [CellBeta],\n)\n]\n\n"
+                f'#gambar("/{rel_td}/{img_path.name}", lebar-word: 250pt, penuh: false, di-tempat: true, keputusan: "tempat", nomor: 2, label: [Figure 1.], isi: [Figure caption sample])\n\n'
+                "#pm(2);Narrative below objects " + ("text " * 50) + "#pe(2)\n"
+                "]\n"
+            )
+            main_typ = td_p / "main.typ"
+            body_typ = td_p / "body.typ"
+            meta_json = td_p / "meta.json"
+            pdf_out = td_p / "out.pdf"
+            body_typ.write_text(body, encoding="utf-8")
+            meta_json.write_text(
+                json.dumps({
+                    "judul": "Font 10pt Test",
+                    "penulis": [{"nama": "Author One", "afiliasi": "1", "korespondensi": True}],
+                    "afiliasi": ["Inst"],
+                    "email": "a@example.com",
+                    "riwayat": {},
+                    "abstrak": "Abstrak pengujian ukuran font.",
+                    "kata_kunci": ["font", "grid"],
+                    "sitasi_penulis": "Author, A.",
+                    "judul_kalimat": "Font 10pt Test",
+                    "header_ganjil": "Author",
+                    "terbitan": {"volume": "5", "nomor": "4", "edisi": "December", "tahun": "2026", "halaman_awal": 1},
+                }),
+                encoding="utf-8",
+            )
+            main_typ.write_text(
+                '#import "/template_jurnal.typ": *\n'
+                '#let cfg = json("/jurnal/bsscd/config.json")\n'
+                f'#let meta = json("/{rel_td}/{meta_json.name}")\n'
+                '#show: artikel.with(cfg, meta)\n'
+                f'#include "/{rel_td}/{body_typ.name}"\n',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [engine.TYPST, "compile", "--root", str(BASE), "--font-path", str(BASE / "fonts"), str(main_typ), str(pdf_out)],
+                check=True,
+                capture_output=True,
+            )
+            pos, _ = engine.kueri_posisi(str(main_typ))
+            grid = engine.baris_luar_grid(str(pdf_out), pos, body)
+            self.assertEqual(grid, [], f"Narrative below 10pt table went off 11pt grid: {grid}")
+
+            span_sizes = {}
+            with fitz.open(str(pdf_out)) as doc:
+                for pg in doc:
+                    for blk in pg.get_text("dict").get("blocks", []):
+                        for ln in blk.get("lines", []):
+                            for sp in ln.get("spans", []):
+                                t = sp.get("text", "").strip()
+                                if t:
+                                    span_sizes.setdefault(t, []).append(round(float(sp["size"]), 2))
+
+            for token, expected in (
+                ("Table 1.", 10.0),
+                ("Table caption sample", 10.0),
+                ("HeaderAlpha", 10.0),
+                ("CellAlpha", 10.0),
+                ("Figure 1.", 10.0),
+                ("Figure caption sample", 10.0),
+            ):
+                matched = [sz for txt, szs in span_sizes.items() if token in txt for sz in szs]
+                self.assertTrue(matched, f"Token {token!r} not found in compiled PDF")
+                for sz in matched:
+                    self.assertAlmostEqual(sz, expected, delta=0.1, msg=f"{token}: got {sz}")
+
+            body_matched = [sz for txt, szs in span_sizes.items() if "Narrative below objects" in txt for sz in szs]
+            self.assertTrue(body_matched)
+            for sz in body_matched:
+                self.assertAlmostEqual(sz, 11.0, delta=0.1)
 
 
 if __name__ == "__main__":
