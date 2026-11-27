@@ -400,6 +400,81 @@ class TestQAStandalone(unittest.TestCase):
         report = analyze_pdf(str(pdf_path), rules=self.rules)
         self.assertTrue(any(i.category == "pita_teks" for i in report.issues), [i.to_dict() for i in report.issues])
 
+    def test_bottom_table_inner_rule_not_mistaken_for_footer_rule(self):
+        pdf_path = self.tmp_dir / "bottom_table_footer.pdf"
+        doc = fitz.open()
+        p1 = doc.new_page(width=595.28, height=841.89)
+        _add_col_lines(p1, 76.535, 111.2, 48, prefix="Body left text")
+        _add_col_lines(p1, 305.135, 111.2, 48, prefix="Body right text")
+        # Tabel di dasar halaman (y=668..748) dengan garis internal lebar > 65% text_width
+        p1.draw_rect(fitz.Rect(153.5, 668.0, 441.7, 748.0), color=(0, 0, 0), width=0.7)
+        p1.draw_line((153.5, 732.4), (441.7, 732.4), color=(0, 0, 0), width=0.7)
+        p1.insert_text((170.0, 690.0), "Col A", fontname="tibo", fontsize=10)
+        p1.insert_text((310.0, 690.0), "Col B", fontname="tibo", fontsize=10)
+        # Running footer asli di y=765.5 (x=76.535..518.735)
+        p1.draw_line((76.535, 765.5), (518.735, 765.5), color=(0, 0, 0), width=0.8)
+        p1.insert_text((76.535, 774.6), "Bulletin of Social Studies | 701", fontname="tiro", fontsize=10)
+        doc.save(str(pdf_path))
+        doc.close()
+
+        report = analyze_pdf(str(pdf_path), rules=self.rules)
+        footer_errs = [i for i in report.issues if i.category == "margin_objek" and "batas bawah" in i.title.lower()]
+        self.assertEqual(footer_errs, [], [i.to_dict() for i in footer_errs])
+
+    def test_symmetric_centered_two_column_table_not_flagged_as_gutter_violation(self):
+        pdf_path = self.tmp_dir / "centered_table.pdf"
+        doc = fitz.open()
+        p1 = doc.new_page(width=595.28, height=841.89)
+        _add_col_lines(p1, 76.535, 111.2, 8, prefix="Top left")
+        _add_col_lines(p1, 305.135, 111.2, 8, prefix="Top right")
+        # Tabel penuh terpusat simetris (x=170.6..423.7, lebar 253.1 pt) tanpa teks samping
+        p1.draw_rect(fitz.Rect(170.6, 220.0, 423.7, 320.0), color=(0, 0, 0), width=0.8)
+        p1.draw_line((170.6, 245.0), (423.7, 245.0), color=(0, 0, 0), width=0.8)
+        # Objek melenceng dari pusat (x=110.0..340.0, lebar 230.0 pt) -> wajib tetap terdeteksi
+        p1.draw_rect(fitz.Rect(110.0, 360.0, 340.0, 440.0), color=(0, 0, 0), fill=(0.9, 0.9, 0.9))
+        doc.save(str(pdf_path))
+        doc.close()
+
+        report = analyze_pdf(str(pdf_path), rules=self.rules)
+        gutter_errs = [i for i in report.issues if i.category == "margin_objek" and "gutter" in i.title.lower()]
+        self.assertEqual(len(gutter_errs), 1, [i.to_dict() for i in gutter_errs])
+        self.assertAlmostEqual(gutter_errs[0].bbox[1], 360.0, delta=2.0)
+
+    def test_complete_one_line_section_followed_by_heading_not_orphan_heading(self):
+        pdf_path = self.tmp_dir / "one_line_section.pdf"
+        doc = fitz.open()
+        p1 = doc.new_page(width=595.28, height=841.89)
+        p1.insert_text((76.535, 111.2), "■ CONFLICT OF INTEREST", fontname="tibo", fontsize=11)
+        p1.insert_text((76.535, 122.2), "The authors declare no conflict of interest.", fontname="tiro", fontsize=11)
+        p1.insert_text((76.535, 144.2), "■ ETHICS STATEMENT", fontname="tibo", fontsize=11)
+        _add_col_lines(p1, 76.535, 155.2, 4, prefix="Ethics approval detail")
+        _add_col_lines(p1, 305.135, 111.2, 8, prefix="Right col text")
+        doc.save(str(pdf_path))
+        doc.close()
+
+        report = analyze_pdf(str(pdf_path), rules=self.rules)
+        orphan_hdgs = [i for i in report.issues if i.category == "orphan_heading"]
+        self.assertEqual(orphan_hdgs, [], [i.to_dict() for i in orphan_hdgs])
+
+    def test_complete_one_line_declaration_section_at_column_bottom_not_orphan_heading(self):
+        pdf_path = self.tmp_dir / "one_line_decl_bottom.pdf"
+        doc = fitz.open()
+        p1 = doc.new_page(width=595.28, height=841.89)
+        _add_col_lines(p1, 76.535, 111.2, 59, prefix="Filled left column")
+        _add_col_lines(p1, 305.135, 111.2, 57, prefix="Filled right column")
+        p1.insert_text((305.135, 749.2), "■ CONFLICT OF INTEREST", fontname="tibo", fontsize=11)
+        p1.insert_text((305.135, 760.2), "The authors declare no conflict of interest.", fontname="tiro", fontsize=11)
+        p2 = doc.new_page(width=595.28, height=841.89)
+        p2.insert_text((76.535, 111.2), "■ ETHICS STATEMENT", fontname="tibo", fontsize=11)
+        _add_col_lines(p2, 76.535, 122.2, 4, prefix="Ethics approval text")
+        _add_col_lines(p2, 305.135, 111.2, 5, prefix="Right col closing")
+        doc.save(str(pdf_path))
+        doc.close()
+
+        report = analyze_pdf(str(pdf_path), rules=self.rules)
+        orphan_hdgs = [i for i in report.issues if i.category == "orphan_heading"]
+        self.assertEqual(orphan_hdgs, [], [i.to_dict() for i in orphan_hdgs])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

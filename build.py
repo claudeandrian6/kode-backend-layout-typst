@@ -2894,10 +2894,13 @@ def susun_teks(body_dasar, keputusan, hapus=None, akhir_seimbang=False):
         if kp["jenis"] in ("atas", "bawah") and k != hapus:          # FIX-PITA-SUSUN
             teks = gabung_kolom_apung(teks, {k: "apung"})
         if kp["jenis"] == "tunda":
-            # FIX-TUNDA-BAWAH: gambar satu kolom yang ditunda diletakkan di dasar kolom,
-            # bukan float di puncak, agar teks mengisi kolom di atasnya.
+            # FIX-TUNDA-BAWAH: gambar satu kolom yang ditunda (atau objek tunda dengan letak="bawah"
+            # untuk memecah tumpukan 3 objek berurutan) diletakkan di dasar halaman/kolom.
             blok_k = body_dasar[slice(*blok_objek(body_dasar, k))]
-            nilai = "bawah" if blok_k.startswith("#gambar(") and not objek_penuh(blok_k) else "apung"
+            nilai = "bawah" if (
+                kp.get("letak") == "bawah"
+                or (blok_k.startswith("#gambar(") and not objek_penuh(blok_k))
+            ) else "apung"
         else:
             nilai = kp["jenis"] if kp["jenis"] in ("atas", "bawah") else "tempat"
         # FIX-OPTIMASI-SKALA: skala hanya untuk #gambar (#tabel tidak punya argumen skala)
@@ -3244,7 +3247,7 @@ def putuskan_objek(body_dasar, body_path, workdir, pdf, keputusan, peta_objek):
                     lintas_b = _tabel_lintas_sejati(body_dasar, k_b, I_b, A_b, tabel_panjang)
                     if pt.get("ada_bawah") and not lintas_b and j_b in ("tempat", "kecil"):
                         kp_b = dict(keputusan[k_b], jenis="bawah")
-                        for mk in ("target", "mode", "n_pm", "teks_baris", "maju", "maju_hal", "lanjut"):
+                        for mk in ("target", "mode", "n_pm", "teks_baris", "maju", "maju_hal", "lanjut", "letak"):
                             kp_b.pop(mk, None)
                         ubah = (k_b, kp_b)
                         log.append("Objek {}: teks terjepit {} baris di antara Objek {} dan Objek {} di hlm {} "
@@ -3587,6 +3590,56 @@ def putuskan_objek(body_dasar, body_path, workdir, pdf, keputusan, peta_objek):
                 break
         if not diubah_jdl:
             break
+    # FIX-TUMPUK-3-OBJEK: bila 3+ objek selebar halaman menumpuk berturut-turut (di puncak
+    # halaman yang sama ATAU objek dasar halaman sebelumnya diikuti >= 2 objek puncak halaman
+    # berikutnya), pindahkan objek tunda terakhir ke dasar halaman ("bawah").
+    tulis(susun_teks(body_dasar, keputusan))
+    pos_tumpuk, _ = kueri_posisi(main)
+    if pos_tumpuk:
+        per_hlm_penuh = {}
+        for k in sorted(keputusan):
+            if not penuh_obj.get(k):
+                continue
+            I_t = pos_tumpuk.get("objek-info-{}".format(k))
+            if I_t:
+                per_hlm_penuh.setdefault(I_t[1], []).append((I_t[3], k))
+        bottom_pages = {
+            h_pg for h_pg, item_h in per_hlm_penuh.items()
+            if any(
+                keputusan[k].get("jenis") == "bawah"
+                or (keputusan[k].get("jenis") == "tunda" and keputusan[k].get("letak") == "bawah")
+                for _, k in item_h
+            )
+        }
+        for h_pg, item_h in sorted(per_hlm_penuh.items()):
+            if h_pg in bottom_pages:
+                continue
+            item_h.sort()
+            objs_h = [k for _, k in item_h]
+            top_stack = [
+                k for k in objs_h
+                if keputusan[k].get("jenis") == "atas"
+                or (keputusan[k].get("jenis") == "tunda" and keputusan[k].get("letak") != "bawah")
+            ]
+            chain_len = len(top_stack) + (1 if (h_pg - 1) in bottom_pages else 0)
+            if chain_len >= 3 and len(top_stack) >= 2:
+                k_last = top_stack[-1]
+                I_last = pos_tumpuk.get("objek-info-{}".format(k_last))
+                A_last = pos_tumpuk.get("objek-akhir-{}".format(k_last))
+                if (keputusan[k_last].get("jenis") == "tunda"
+                        and not _tabel_lintas_sejati(body_dasar, k_last, I_last, A_last, tabel_panjang)):
+                    kp_lama = keputusan[k_last]
+                    keputusan[k_last] = dict(kp_lama, letak="bawah")
+                    tulis(susun_teks(body_dasar, keputusan))
+                    pos_chk, _ = kueri_posisi(main)
+                    I_chk = pos_chk.get("objek-info-{}".format(k_last)) if pos_chk else None
+                    if I_chk and I_chk[1] == h_pg:
+                        pos_tumpuk = pos_chk
+                        bottom_pages.add(h_pg)
+                        log.append("Objek {}: tunda diletakkan di dasar hlm {} untuk memecah tumpukan {} objek berurutan".format(
+                            k_last, h_pg, chain_len))
+                    else:
+                        keputusan[k_last] = kp_lama
     tulis(susun_teks(body_dasar, keputusan))
     return keputusan, log
 
@@ -5327,13 +5380,13 @@ def calon_objek_ketat(body, keputusan, pos, u):
                     if not (kp.get("jenis") == "tempat" and pm_list and nomor == pm_list[0]):
                         kp2 = copy.deepcopy(keputusan)
                         kp2[k] = dict(kp, jenis="geser", target=nomor)
-                        for mk in ("mode", "n_pm", "teks_baris", "maju", "maju_hal", "lanjut"):
+                        for mk in ("mode", "n_pm", "teks_baris", "maju", "maju_hal", "lanjut", "letak"):
                             kp2[k].pop(mk, None)
                         geser_cands.append(kp2)
                 if single_page_tbl and (kp.get("jenis") != "tunda" or tgt_now != nomor):
                     kp2 = copy.deepcopy(keputusan)
                     kp2[k] = dict(kp, jenis="tunda", target=nomor)
-                    for mk in ("mode", "n_pm", "teks_baris", "maju", "maju_hal", "lanjut"):
+                    for mk in ("mode", "n_pm", "teks_baris", "maju", "maju_hal", "lanjut", "letak"):
                         kp2[k].pop(mk, None)
                     geser_cands.append(kp2)
             float_cands = []
@@ -5345,7 +5398,7 @@ def calon_objek_ketat(body, keputusan, pos, u):
                     if kp.get("jenis") != jns:
                         kp2 = copy.deepcopy(keputusan)
                         kp2[k] = dict(kp, jenis=jns)
-                        for mk in ("target", "mode", "n_pm", "teks_baris", "maju", "maju_hal", "lanjut"):
+                        for mk in ("target", "mode", "n_pm", "teks_baris", "maju", "maju_hal", "lanjut", "letak"):
                             kp2[k].pop(mk, None)
                         float_cands.append(kp2)
             for kp2 in (geser_cands + float_cands if kp.get("jenis") == "geser" else float_cands + geser_cands):
@@ -5353,7 +5406,7 @@ def calon_objek_ketat(body, keputusan, pos, u):
             if kp.get("jenis") != "tempat":
                 kp2 = copy.deepcopy(keputusan)
                 kp2[k] = dict(kp, jenis="tempat")
-                for mk in ("target", "mode", "n_pm", "teks_baris", "maju", "maju_hal", "lanjut"):
+                for mk in ("target", "mode", "n_pm", "teks_baris", "maju", "maju_hal", "lanjut", "letak"):
                     kp2[k].pop(mk, None)
                 yield kp2
             continue
@@ -5364,7 +5417,7 @@ def calon_objek_ketat(body, keputusan, pos, u):
             tinggi = float(info[0][1])
             extra = 8.0 if kp.get("jenis") in ("tunda", "atas", "bawah") else 22.0
             tinggi_nyata = tinggi + (
-                4.0 if (kp.get("jenis") == "bawah" or (kp.get("jenis") == "tunda" and not objek_penuh(blok)))
+                4.0 if (kp.get("jenis") == "bawah" or kp.get("letak") == "bawah" or (kp.get("jenis") == "tunda" and not objek_penuh(blok)))
                 else 0.0
             )
             h_gambar = uk[1] * skala
@@ -5408,7 +5461,7 @@ def calon_objek_ketat(body, keputusan, pos, u):
                 continue
             kp2 = copy.deepcopy(keputusan)
             kp2[k] = dict(kp, jenis=jenis)
-            for mk in ("target", "maju", "maju_hal", "lanjut"):
+            for mk in ("target", "maju", "maju_hal", "lanjut", "letak"):
                 kp2[k].pop(mk, None)
             yield kp2
         target = next((int(label[3:]) for label, v in sorted(pos.items(),
@@ -5417,7 +5470,7 @@ def calon_objek_ketat(body, keputusan, pos, u):
         if target is not None:
             kp2 = copy.deepcopy(keputusan)
             kp2[k] = dict(kp, jenis="tunda", target=target)
-            for mk in ("maju", "maju_hal", "lanjut"):
+            for mk in ("maju", "maju_hal", "lanjut", "letak"):
                 kp2[k].pop(mk, None)
             yield kp2
     # Kombinasi perubahan ukuran simultan untuk pasangan 2 gambar (termasuk zero-sum (-1,+1))
@@ -6205,7 +6258,7 @@ def pilih_kandidat(body_dasar, body_path, workdir, keputusan, kandidat, laporan,
                                  or tabel_baris_body(body_dasar, k2) < 15)):
                         kp_bawah = copy.deepcopy(state["kp"])
                         kp_bawah[k2] = dict(kp_bawah[k2], jenis="bawah")
-                        for mk in ("target", "mode", "n_pm", "teks_baris", "maju", "maju_hal", "lanjut"):
+                        for mk in ("target", "mode", "n_pm", "teks_baris", "maju", "maju_hal", "lanjut", "letak"):
                             kp_bawah[k2].pop(mk, None)
                         state["pita_moves"].append(kp_bawah)
                     if (k2 in state["kp"] and state["kp"][k2].get("jenis") in ("tempat", "geser")

@@ -760,6 +760,34 @@ class LayoutFixesTest(unittest.TestCase):
         self.assertEqual(queried_pages, {13, 14})
         self.assertEqual(seen_calls[:4], [(13, 0, 1), (13, 1, 1), (14, 0, 1), (14, 1, 1)])
 
+    def test_susun_teks_tunda_letak_bawah_emits_bawah_keyword(self):
+        body_dasar = (
+            "#kolom[\n"
+            "#pm(1);First paragraph.#pe(1)\n"
+            "]\n"
+            '#tabel(jumlah-kolom: 2, penuh: true, kepala: 1, di-tempat: true, keputusan: "@K1@", label: [Table 1.], isi: [T1])[\n'
+            "#table(columns: (100pt, 100pt), [A], [B], [1], [2])\n"
+            "]\n"
+            '#tabel(jumlah-kolom: 2, penuh: true, kepala: 1, di-tempat: true, keputusan: "@K2@", label: [Table 2.], isi: [T2])[\n'
+            "#table(columns: (100pt, 100pt), [C], [D], [3], [4])\n"
+            "]\n"
+            "#kolom[\n"
+            "#pm(2);Target paragraph after objects.#pe(2)\n"
+            "]\n"
+        )
+        res = engine.susun_teks(
+            body_dasar,
+            {
+                1: {"jenis": "tunda", "target": 2},
+                2: {"jenis": "tunda", "target": 2, "letak": "bawah"},
+            },
+            akhir_seimbang=True,
+        )
+        self.assertIn('keputusan: "apung", nomor: 1', res)
+        self.assertIn('keputusan: "bawah", nomor: 2', res)
+        self.assertLess(res.index('nomor: 1'), res.index("#pm(2);"))
+        self.assertLess(res.index('nomor: 2'), res.index("#pm(2);"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

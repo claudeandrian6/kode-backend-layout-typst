@@ -44,6 +44,10 @@ RE_EQ_INDICATOR = re.compile(
     r"(?:[/×*+^∑√÷±]|(?:\s[-–−]\s)|\(\s*(?:μg|ug|mg|kg|g|mL|L|mol|mM|%|s|min|h|10)\b|\(\d+(?:\.\d+)?\)\s*$)",
     re.I,
 )
+RE_SHORT_SECTION_HEADING = re.compile(
+    r"\b(?:conflict\s+of\s+interest|competing\s+interest|funding|acknowledg|ethics|data\s+availability|consent|declaration)\b",
+    re.I,
+)
 
 
 @dataclass
@@ -278,19 +282,45 @@ def _extract_text_lines(page: Any, page_num: int, rules: JournalRules) -> List[T
     return lines
 
 
-def _detect_header_footer_rules(page: Any, page_num: int, rules: JournalRules) -> Tuple[Optional[float], Optional[float]]:
+def _detect_header_footer_rules(
+    page: Any,
+    page_num: int,
+    rules: JournalRules,
+    lines: Optional[List[TextLine]] = None,
+) -> Tuple[Optional[float], Optional[float]]:
     """Deteksi garis pemisah horizontal running header & running footer."""
     header_y: Optional[float] = None
-    footer_y: Optional[float] = None
+    full_footer_ys: List[float] = []
+    fallback_footer_ys: List[float] = []
     for d in page.get_drawings():
         r = d.get("rect")
-        if r is None:
+        if r is None or r.height >= 2.5:
             continue
-        if r.height < 2.5 and r.width >= rules.text_width * 0.65:
-            if page_num >= 2 and 65.0 <= r.y0 <= 115.0:
-                header_y = float(r.y1) if header_y is None else max(header_y, float(r.y1))
-            elif 720.0 <= r.y0 <= 795.0:
-                footer_y = float(r.y0) if footer_y is None else min(footer_y, float(r.y0))
+        if page_num >= 2 and 65.0 <= r.y0 <= 115.0 and r.width >= rules.text_width * 0.65:
+            header_y = float(r.y1) if header_y is None else max(header_y, float(r.y1))
+        elif 720.0 <= r.y0 <= 795.0:
+            if r.width >= rules.text_width * 0.85 and r.x0 <= rules.margin_left + 15.0 and r.x1 >= rules.margin_right - 15.0:
+                full_footer_ys.append(float(r.y0))
+            elif r.width >= rules.text_width * 0.65 and r.y0 >= rules.content_bottom - 5.0:
+                fallback_footer_ys.append(float(r.y0))
+
+    footer_y: Optional[float] = None
+    cands = full_footer_ys or fallback_footer_ys
+    if cands:
+        y_bot = max(cands)
+        footer_y = min((y for y in cands if y_bot - 4.0 <= y <= y_bot), default=y_bot)
+        if footer_y < rules.content_bottom - 2.0 and lines is not None:
+            has_footer_text = any(
+                footer_y - 1.0 <= ln.y_base <= footer_y + 32.0
+                and (
+                    ln.size <= rules.body_font_size - 0.3
+                    or RE_RUNNING_FOOTER.search(ln.text)
+                    or RE_PAGE_NUM_ONLY.match(ln.text.strip())
+                )
+                for ln in lines
+            )
+            if not has_footer_text:
+                footer_y = None
     return header_y, footer_y
 
 
@@ -450,8 +480,16 @@ def _extract_visual_objects(
             for ln in lines
         )
         w = mbox[2] - mbox[0]
-        centered = abs(0.5 * (mbox[0] + mbox[2]) - rules.gutter_center) <= 28.0
-        is_full = w > rules.col_width + 55.0 and not overlapping_side_text and (centered or w >= 300.0)
+        center_offset = abs(0.5 * (mbox[0] + mbox[2]) - rules.gutter_center)
+        centered = center_offset <= 28.0
+        strictly_centered = center_offset <= 12.0
+        is_full = (
+            not overlapping_side_text
+            and (
+                (w > rules.col_width + 55.0 and (centered or w >= 300.0))
+                or (w > rules.col_width + rules.gutter_tol and strictly_centered)
+            )
+        )
         merged_items.append(
             VisualObject(
                 page=page_num,
@@ -787,7 +825,7 @@ def analyze_pdf(pdf_path: str, rules: Optional[JournalRules] = None) -> QAReport
             page_num = idx + 1
             page = doc[idx]
             lines = _extract_text_lines(page, page_num, rules)
-            header_rule_y, footer_rule_y = _detect_header_footer_rules(page, page_num, rules)
+            header_rule_y, footer_rule_y = _detect_header_footer_rules(page, page_num, rules, lines=lines)
             footnote_y = _detect_footnote_y(page, lines, body_size, rules)
             body_top = _detect_page1_body_top(page, lines, body_size, rules) if page_num == 1 else rules.margin_top
             objects = _extract_visual_objects(page, page_num, body_top, footnote_y, footer_rule_y, lines, rules)
@@ -1277,69 +1315,6 @@ def analyze_pdf(pdf_path: str, rules: Optional[JournalRules] = None) -> QAReport
                                 )
                             )
 
-                # Cek Orphan Heading pada setiap kolom di segmen ini
-                for col in (0, 1):
-                    col_lns = seg_cols[col]
-                    if not col_lns:
-                        continue
-                    i = 0
-                    while i < len(col_lns):
-                        if not _is_heading_line(col_lns[i], body_size):
-                            i += 1
-                            continue
-                        j = i
-                        while j + 1 < len(col_lns) and _is_heading_line(col_lns[j + 1], body_size):
-                            if col_lns[j + 1].y_base - col_lns[j].y_base <= body_size * 1.55:
-                                j += 1
-                            else:
-                                break
-                        hdg_lines = col_lns[i:j + 1]
-                        hdg_text = " ".join(ln.text for ln in hdg_lines)
-                        tail_lines = col_lns[j + 1:]
-                        body_follow = 0
-                        for tln in tail_lines:
-                            if _is_heading_line(tln, body_size):
-                                break
-                            body_follow += 1
-
-                        followed_by_heading = bool(tail_lines and _is_heading_line(tail_lines[0], body_size))
-                        hb = (
-                            min(ln.x0 for ln in hdg_lines),
-                            min(ln.y0 for ln in hdg_lines),
-                            max(ln.x1 for ln in hdg_lines),
-                            max(ln.y1 for ln in hdg_lines),
-                        )
-                        is_excerpt_above_obj = (
-                            body_follow == 0
-                            and bool(re.match(r"^Excerpt\s+\d+\b", hdg_text, re.I))
-                            and any(o.y0 >= hb[3] - 4.0 and o.y0 <= hb[3] + 85.0 for o in objects)
-                        )
-                        if not followed_by_heading and not is_excerpt_above_obj and body_follow < rules.min_heading_lines:
-                            sev = "fatal" if body_follow == 0 else "error"
-                            issues.append(
-                                Issue(
-                                    page=page_num,
-                                    category="orphan_heading",
-                                    severity=sev,
-                                    title=(
-                                        "Orphan heading sendirian di dasar kolom (0 baris isi)"
-                                        if body_follow == 0
-                                        else f"Heading hanya diikuti {body_follow} baris teks (min. {rules.min_heading_lines})"
-                                    ),
-                                    message=(
-                                        f"Subjudul \"{hdg_text[:55]}\" hanya memiliki {body_follow} baris paragraf "
-                                        f"di bawahnya pada kolom {'kiri' if col == 0 else 'kanan'}."
-                                    ),
-                                    suggestion=(
-                                        "Pindahkan subjudul ini ke puncak kolom berikutnya atau aktifkan "
-                                        "'Keep with next paragraph' di Scribus/PageMaker."
-                                    ),
-                                    bbox=hb,
-                                    column=col,
-                                )
-                            )
-                        i = j + 1
-
             # 5. Cek Grid 11 pt antar baris narasi (tidak memeriksa footer, heading, dan rumus)
             off_grid_count = 0
             eq_obj_ids = {id(ln) for ln in equation_lines_all}
@@ -1477,6 +1452,90 @@ def analyze_pdf(pdf_path: str, rules: Optional[JournalRules] = None) -> QAReport
                     bbox=bx,
                 )
             )
+
+        # 6b. Cek Orphan Heading per segmen (dapat melihat heading pembuka di segmen berikutnya)
+        for s_idx, seg in enumerate(all_segments):
+            col_lns = seg["lines"]
+            page_num = seg["page"]
+            col = seg["col"]
+            objects = per_page_data[page_num - 1]["objects"]
+            next_seg_lines = all_segments[s_idx + 1]["lines"] if s_idx + 1 < len(all_segments) else []
+            i = 0
+            while i < len(col_lns):
+                if not _is_heading_line(col_lns[i], body_size):
+                    i += 1
+                    continue
+                j = i
+                while j + 1 < len(col_lns) and _is_heading_line(col_lns[j + 1], body_size):
+                    if col_lns[j + 1].y_base - col_lns[j].y_base <= body_size * 1.55:
+                        j += 1
+                    else:
+                        break
+                hdg_lines = col_lns[i:j + 1]
+                hdg_text = " ".join(ln.text for ln in hdg_lines)
+                tail_lines = col_lns[j + 1:]
+                body_follow = 0
+                for tln in tail_lines:
+                    if _is_heading_line(tln, body_size):
+                        break
+                    body_follow += 1
+
+                followed_by_heading = bool(tail_lines and _is_heading_line(tail_lines[0], body_size))
+                complete_short_section = (
+                    body_follow >= 1
+                    and len(tail_lines) > body_follow
+                    and _is_heading_line(tail_lines[body_follow], body_size)
+                )
+                complete_short_cross_col = (
+                    body_follow >= 1
+                    and len(tail_lines) == body_follow
+                    and bool(next_seg_lines)
+                    and _is_heading_line(next_seg_lines[0], body_size)
+                    and bool(RE_SHORT_SECTION_HEADING.search(hdg_text))
+                    and tail_lines[body_follow - 1].text.rstrip().endswith((".", "!", "?", '"', "”", ")", "]"))
+                )
+                hb = (
+                    min(ln.x0 for ln in hdg_lines),
+                    min(ln.y0 for ln in hdg_lines),
+                    max(ln.x1 for ln in hdg_lines),
+                    max(ln.y1 for ln in hdg_lines),
+                )
+                is_excerpt_above_obj = (
+                    body_follow == 0
+                    and bool(re.match(r"^Excerpt\s+\d+\b", hdg_text, re.I))
+                    and any(o.y0 >= hb[3] - 4.0 and o.y0 <= hb[3] + 85.0 for o in objects)
+                )
+                if (
+                    not followed_by_heading
+                    and not is_excerpt_above_obj
+                    and not complete_short_section
+                    and not complete_short_cross_col
+                    and body_follow < rules.min_heading_lines
+                ):
+                    sev = "fatal" if body_follow == 0 else "error"
+                    issues.append(
+                        Issue(
+                            page=page_num,
+                            category="orphan_heading",
+                            severity=sev,
+                            title=(
+                                "Orphan heading sendirian di dasar kolom (0 baris isi)"
+                                if body_follow == 0
+                                else f"Heading hanya diikuti {body_follow} baris teks (min. {rules.min_heading_lines})"
+                            ),
+                            message=(
+                                f"Subjudul \"{hdg_text[:55]}\" hanya memiliki {body_follow} baris paragraf "
+                                f"di bawahnya pada kolom {'kiri' if col == 0 else 'kanan'}."
+                            ),
+                            suggestion=(
+                                "Pindahkan subjudul ini ke puncak kolom berikutnya atau aktifkan "
+                                "'Keep with next paragraph' di Scribus/PageMaker."
+                            ),
+                            bbox=hb,
+                            column=col,
+                        )
+                    )
+                i = j + 1
 
         # 7. Cek Widow & Orphan lintas segmen kolom
         leading = rules.grid_pt
