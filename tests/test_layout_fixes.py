@@ -877,6 +877,198 @@ class LayoutFixesTest(unittest.TestCase):
             for sz in body_matched:
                 self.assertAlmostEqual(sz, 11.0, delta=0.1)
 
+    def test_hypothesis_detection_and_false_positive_guards(self):
+        def para_str(txt):
+            return {"t": "Para", "c": [{"t": "Str", "c": txt}]}
+
+        blocks = [
+            {"t": "Header", "c": [1, ["", [], []], [{"t": "Str", "c": "INTRODUCTION"}]]},
+            para_str("Introductory narrative paragraph with normal indentation."),
+            para_str("H1: Transformational leadership positively affects organizational trust."),
+            para_str("H1 was supported in previous meta-analytic studies across sectors."),
+            para_str("H2. Digital competence positively affects teacher performance."),
+            {"t": "Para", "c": [{"t": "Strong", "c": [{"t": "Str", "c": "H3: Self-efficacy improves learning motivation"}]}]},
+            para_str("H4 \u2013 Perceived usefulness predicts technology adoption among teachers."),
+            para_str("H1 \u2013 H5 were tested using structural equation modeling in Amos."),
+            para_str("H2O is a chemical compound rather than a hypothesis."),
+            para_str("H6: Organizational culture mediates leadership and innovation."),
+            para_str("H7: Peer collaboration moderates training transfer."),
+            para_str("Hypothesis 8: Work engagement predicts employee retention."),
+            para_str("QA1: How do principals support curriculum innovation?"),
+            para_str("QA2: What barriers emerge during implementation?"),
+            {"t": "Header", "c": [1, ["", [], []], [{"t": "Str", "c": "REFERENCES"}]]},
+            para_str("H1: Reference entry inside references section (2024). Journal, 1(1), 1-10."),
+        ]
+        laporan = {"masalah": [], "peringatan": [], "normalisasi": []}
+        with tempfile.TemporaryDirectory(dir=BASE, prefix="test-hyp-ast-") as td:
+            out_blocks, _ = engine.ubah_isi(blocks, td, laporan, di_tempat=True)
+            ast_doc = {"pandoc-api-version": [1, 23, 1], "meta": {}, "blocks": out_blocks}
+            proc = subprocess.run(
+                [engine.PANDOC, "-f", "json", "-t", "typst", "--wrap=none"],
+                input=json.dumps(ast_doc).encode("utf-8"),
+                capture_output=True,
+                check=True,
+            )
+            typ_txt = proc.stdout.decode("utf-8")
+
+        self.assertEqual(laporan["masalah"], [], laporan)
+        lines = [ln.strip() for ln in typ_txt.splitlines() if ln.strip()]
+
+        def line_idx(substr):
+            for idx, ln in enumerate(lines):
+                if substr in ln:
+                    return idx
+            self.fail(f"{substr!r} not found in Typst output:\n{typ_txt}")
+
+        # Standalone dan berurutan H1..H4, H6, H7 menjadi #label-gantung + #celah() di atasnya
+        for lbl, snippet in (
+            ("[H1:]", "Transformational leadership"),
+            ("[H2.]", "Digital competence"),
+            ("[H3:]", "Self-efficacy"),
+            ("[H4 \u2013]", "Perceived usefulness"),
+            ("[H6:]", "Organizational culture"),
+            ("[H7:]", "Peer collaboration"),
+        ):
+            idx = line_idx(snippet)
+            self.assertIn(f"#label-gantung({lbl})", lines[idx])
+            self.assertGreater(idx, 0)
+            self.assertEqual(lines[idx - 1], "#celah()", f"Missing #celah() above {lbl}: {lines[idx - 1:idx + 1]}")
+
+        # Hypothesis 8: berbentuk paragraf tanpa indent (#h(-25pt)) + #celah() di atasnya
+        idx_h8 = line_idx("Work engagement predicts employee retention.")
+        self.assertIn("#h(-25pt)", lines[idx_h8])
+        self.assertEqual(lines[idx_h8 - 1], "#celah()")
+
+        # Guard false-positive: narasi biasa, rentang H1 - H5, rumus H2O, dan daftar QA tidak rusak
+        for prose in (
+            "H1 was supported in previous",
+            "H1 \u2013 H5 were tested",
+            "H2O is a chemical compound",
+        ):
+            idx_p = line_idx(prose)
+            self.assertNotIn("#label-gantung", lines[idx_p])
+            self.assertNotIn("#h(-25pt)", lines[idx_p])
+            self.assertNotEqual(lines[idx_p - 1], "#celah()")
+
+        idx_qa1 = line_idx("How do principals support")
+        self.assertIn("#label-gantung([QA1:])", lines[idx_qa1])
+        self.assertNotEqual(lines[idx_qa1 - 1], "#celah()")
+
+        idx_ref = line_idx("Reference entry inside references")
+        self.assertIn("#referensi[", lines[idx_ref])
+        self.assertNotIn("#label-gantung", lines[idx_ref])
+
+    def test_hypothesis_rendered_pdf_no_indent_11pt_gap_and_on_grid(self):
+        import editor_blok
+
+        def para_str(txt):
+            return {"t": "Para", "c": [{"t": "Str", "c": txt}]}
+
+        blocks = [
+            {"t": "Header", "c": [1, ["", [], []], [{"t": "Str", "c": "INTRODUCTION"}]]},
+            para_str(
+                "This introductory narrative paragraph discusses prior findings before formulating the hypotheses. "
+                * 2
+            ),
+            para_str("H1: Transformational leadership has a positive effect on teacher trust in schools."),
+            para_str(
+                "Following the first hypothesis, another body paragraph elaborates the structural model and variables. "
+                * 2
+            ),
+            para_str("H6: Organizational culture mediates leadership and innovation in public institutions."),
+            para_str("H7: Digital literacy moderates training and employee performance across departments."),
+            para_str("Hypothesis 8: Psychological safety encourages open knowledge sharing inside teams."),
+            para_str("Another closing narrative paragraph continues normal first-line indentation in the column. " * 2),
+        ]
+        laporan = {"masalah": [], "peringatan": [], "normalisasi": []}
+        with tempfile.TemporaryDirectory(dir=BASE, prefix="test-hyp-pdf-") as td:
+            td_p = Path(td)
+            rel_td = td_p.relative_to(BASE).as_posix()
+            out_blocks, _ = engine.ubah_isi(blocks, td, laporan, di_tempat=True)
+            ast_doc = {"pandoc-api-version": [1, 23, 1], "meta": {}, "blocks": out_blocks}
+            proc = subprocess.run(
+                [engine.PANDOC, "-f", "json", "-t", "typst", "--wrap=none"],
+                input=json.dumps(ast_doc).encode("utf-8"),
+                capture_output=True,
+                check=True,
+            )
+            body_typ_text = '#import "/template_jurnal.typ": *\n\n' + proc.stdout.decode("utf-8")
+            body_typ = td_p / "body.typ"
+            main_typ = td_p / "main.typ"
+            meta_json = td_p / "meta.json"
+            pdf_out = td_p / "out.pdf"
+            body_typ.write_text(body_typ_text, encoding="utf-8")
+            meta_json.write_text(
+                json.dumps({
+                    "judul": "Hypothesis Layout Verification",
+                    "penulis": [{"nama": "Author One", "afiliasi": "1", "korespondensi": True}],
+                    "afiliasi": ["Inst"],
+                    "email": "a@example.com",
+                    "riwayat": {},
+                    "abstrak": "Abstrak pengujian tata letak hipotesis.",
+                    "kata_kunci": ["hypothesis", "layout", "grid"],
+                    "sitasi_penulis": "Author, A.",
+                    "judul_kalimat": "Hypothesis layout verification",
+                    "header_ganjil": "Author",
+                    "terbitan": {"volume": "6", "nomor": "1", "edisi": "March", "tahun": "2026", "halaman_awal": 1},
+                }),
+                encoding="utf-8",
+            )
+            main_typ.write_text(
+                '#import "/template_jurnal.typ": *\n'
+                '#let cfg = json("/jurnal/bsscd/config.json")\n'
+                f'#let meta = json("/{rel_td}/{meta_json.name}")\n'
+                '#show: artikel.with(cfg, meta)\n'
+                f'#include "/{rel_td}/{body_typ.name}"\n',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [engine.TYPST, "compile", "--root", str(BASE), "--font-path", str(BASE / "fonts"), str(main_typ), str(pdf_out)],
+                check=True,
+                capture_output=True,
+            )
+            pos, _ = engine.kueri_posisi(str(main_typ))
+            self.assertEqual(engine.baris_luar_grid(str(pdf_out), pos, body_typ_text), [])
+
+            # Pastikan editor_blok mengekstrak blok hipotesis tanpa error
+            parsed_blocks = editor_blok.parse_body(body_typ_text)
+            labeled = [b for b in parsed_blocks if b.get("jenis") == "labeled_paragraph"]
+            self.assertGreaterEqual(len(labeled), 3)
+
+            all_lines = []
+            with fitz.open(str(pdf_out)) as doc:
+                for pg in doc:
+                    for blk in pg.get_text("dict").get("blocks", []):
+                        for ln in blk.get("lines", []):
+                            txt = "".join(s.get("text", "") for s in ln.get("spans", [])).strip()
+                            if txt and round(float(ln["spans"][0]["size"]), 1) == 11.0 and ln["spans"][0]["origin"][1] > 380.0:
+                                col = 0 if ln["bbox"][0] < 295.0 else 1
+                                all_lines.append((
+                                    col,
+                                    float(ln["bbox"][0]),
+                                    float(ln["spans"][0]["origin"][1]),
+                                    txt,
+                                ))
+            all_lines.sort(key=lambda item: (item[0], item[2]))
+
+            def find_line(prefix):
+                for idx, item in enumerate(all_lines):
+                    if item[3].startswith(prefix):
+                        return idx, item
+                self.fail(f"Rendered line starting with {prefix!r} not found")
+
+            for prefix in ("H1:", "H6:", "H7:", "Hypothesis 8:"):
+                idx, cur = find_line(prefix)
+                col_x = 76.535 if cur[0] == 0 else 305.135
+                self.assertAlmostEqual(cur[1], col_x, delta=1.5, msg=f"{prefix} unexpected indent x0={cur[1]}")
+                if idx > 0 and all_lines[idx - 1][0] == cur[0]:
+                    dy = cur[2] - all_lines[idx - 1][2]
+                    self.assertAlmostEqual(dy, 22.0, delta=0.4, msg=f"{prefix} expected 11pt blank gap (dy=22pt), got {dy:.2f}")
+
+            _, norm_p = find_line("Another")
+            col_x_norm = 76.535 if norm_p[0] == 0 else 305.135
+            self.assertAlmostEqual(norm_p[1], col_x_norm + 25.0, delta=1.5)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

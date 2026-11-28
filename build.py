@@ -583,6 +583,24 @@ def is_wawancara(inl):
     return t[:1] in ('"', "“")
 
 
+# FIX-HIPOTESIS: deteksi paragraf hipotesis ("H1: ...", "H1. ...", "H1a: ...", "H0: ...", "Ha: ...",
+# "H1 – ...", "Hypothesis 1: ...", "Hipotesis 1: ..."). Wajib ada pemisah eksplisit agar kalimat
+# narasi seperti "H1 was supported..." atau rentang "H1 - H5 were tested..." tidak ikut terformat.
+RE_HIPOTESIS = re.compile(
+    r"^(H(?:\d{1,2}[a-z]?|a))\s*(?:([:\.])\s+(?=\S)|([\-–—])\s+(?!H\d)(?=\S))"
+)
+RE_HIPOTESIS_KATA = re.compile(
+    r"^(?:Hypothesis|Hipotesis)\s+(?:\d{1,2}[a-z]?|0|a)\s*[:\.\-–—]\s+(?=\S)",
+    re.I,
+)
+
+
+def is_hipotesis(teks):
+    """True bila teks paragraf diawali label/frasa hipotesis berpemisah eksplisit."""
+    t = (teks or "").strip()
+    return bool(RE_HIPOTESIS.match(t) or RE_HIPOTESIS_KATA.match(t))
+
+
 # ======================================================================
 #  Metadata halaman 1
 # ======================================================================
@@ -1249,7 +1267,8 @@ def ubah_isi(blocks, workdir, laporan, di_tempat=False):
                 or is_header(teks_j, ketat=True):
             items.append({"jenis": "bagian", "teks": bersih_nomor(teks_j).upper(), "asli": teks_j, "inl": inl})
             continue
-        if only_wrapped(inl, "Strong") and len(teks) < 150 and not teks.endswith("."):
+        if only_wrapped(inl, "Strong") and len(teks) < 150 and not teks.endswith(".") \
+                and not is_hipotesis(teks):
             items.append({"jenis": "sub", "inl": unwrap(inl, "Strong")})
             continue
         # FIX-JUDUL-POLOS: sub-bab bernomor "2.1 Judul" / "2.1.3 Judul" walau tidak tebal
@@ -1261,7 +1280,8 @@ def ubah_isi(blocks, workdir, laporan, di_tempat=False):
         if is_wawancara(inl):
             items.append({"jenis": "wawancara", "inl": unwrap(inl, "Emph")})
             continue
-        if only_wrapped(inl, "Emph") and len(teks) < 150 and not teks.endswith("."):
+        if only_wrapped(inl, "Emph") and len(teks) < 150 and not teks.endswith(".") \
+                and not is_hipotesis(teks):
             items.append({"jenis": "subsub", "inl": unwrap(inl, "Emph")})
             continue
         # FIX-QA-SUB-POLOS: baris pendek tanpa tanda baca akhir, tidak tebal/miring/bernomor
@@ -1419,6 +1439,29 @@ def ubah_isi(blocks, workdir, laporan, di_tempat=False):
                 items[j]["jenis"] = "terpakai"
                 j += 1
         k += 1
+
+    # FIX-HIPOTESIS: paragraf hipotesis tunggal maupun berurutan ("H1: ...", "H1. ...", "H1 – ...",
+    # "Hypothesis 1: ...", "Hipotesis 1: ...") diformat tanpa indentasi dan berjarak 11pt (#celah).
+    di_ref_hip = False
+    for it in items:
+        if it["jenis"] == "bagian":
+            di_ref_hip = it["teks"] in BAGIAN_REFERENSI
+            continue
+        if di_ref_hip or it["jenis"] != "para" or not it.get("inl"):
+            continue
+        mentah = stringify(it["inl"])
+        teks_s = mentah.strip()
+        m_h = RE_HIPOTESIS.match(teks_s)
+        if m_h:
+            sep = m_h.group(2) or m_h.group(3)
+            lbl = m_h.group(1) + (" " + sep if sep in ("-", "–", "—") else sep)
+            it["jenis"] = "berlabel"
+            it["label"] = lbl
+            it["hipotesis"] = True
+            it["inl_isi"] = drop_prefix(it["inl"], len(mentah) - len(mentah.lstrip()) + len(m_h.group(0)))
+        elif RE_HIPOTESIS_KATA.match(teks_s):
+            it["hipotesis_para"] = True
+            it["calon_sub"] = False
 
     # FIX-LABEL-GANTUNG: >= 2 paragraf berurutan berlabel sama ("QA1: ...", "H1: ...", "RQ2: ...")
     # menjadi daftar berlabel dengan tab stop 25pt dan baris lanjutan menggantung.
@@ -1713,7 +1756,9 @@ def ubah_isi(blocks, workdir, laporan, di_tempat=False):
                                  + gabung_inline_item(item) + [raw_i("]")]))
         elif j == "wawancara":
             out.append(plain([raw_i("#wawancara[")] + it["inl"] + [raw_i("]")]))
-        elif j == "berlabel":     # FIX-LABEL-GANTUNG
+        elif j == "berlabel":     # FIX-LABEL-GANTUNG & FIX-HIPOTESIS
+            if it.get("hipotesis") and sebelum not in ("bagian", "sub", "subsub", "subsubsub"):
+                out.append(raw_b("#celah()"))
             out.append(plain([raw_i("#label-gantung([{}])[".format(it["label"]))] + it["inl_isi"] + [raw_i("]")]))
         elif j == "rumus_teks":                              # FIX-RUMUS-TEKS
             out.append(plain([raw_i("#rumus-teks[")] + it["inl"] + [raw_i("]")]))
@@ -1736,9 +1781,14 @@ def ubah_isi(blocks, workdir, laporan, di_tempat=False):
                     laporan["masalah"].append(
                         "Kemungkinan sub-bab tanpa format: \"{}\" (tebalkan atau beri nomor, mis. "
                         "2.1, di naskah)".format(stringify(it["inl"]).strip()[:60]))
-                # FIX-INDENT-LANJUTAN: paragraf sesudah kutipan/daftar/rumus yang di Word tidak
-                # ber-indent = lanjutan paragraf sebelumnya -> tanpa indent baris pertama
-                if (sebelum in ("wawancara", "daftar", "berlabel") or rumus_sebelum) and \
+                # FIX-HIPOTESIS & FIX-INDENT-LANJUTAN: hipotesis kata ("Hypothesis 1: ...") maupun
+                # paragraf lanjutan tanpa indent baris pertama -> hilangkan indent 25pt.
+                if it.get("hipotesis_para"):
+                    if sebelum not in ("bagian", "sub", "subsub", "subsubsub"):
+                        out.append(raw_b("#celah()"))
+                    if it["blok"].get("t") == "Para":
+                        it["blok"]["c"] = [raw_i("#h(-25pt)")] + it["blok"]["c"]
+                elif (sebelum in ("wawancara", "daftar", "berlabel") or rumus_sebelum) and \
                         kunci_paragraf(stringify(it["inl"])) in TANPA_INDENT and it["blok"].get("t") == "Para":
                     it["blok"]["c"] = [raw_i("#h(-25pt)")] + it["blok"]["c"]
                 out.append(it["blok"])
