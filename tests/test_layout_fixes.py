@@ -1069,6 +1069,181 @@ class LayoutFixesTest(unittest.TestCase):
             col_x_norm = 76.535 if norm_p[0] == 0 else 305.135
             self.assertAlmostEqual(norm_p[1], col_x_norm + 25.0, delta=1.5)
 
+    def test_susun_teks_merges_consecutive_floating_objects_without_splitting_columns(self):
+        # Memastikan dua objek apung berurutan (atas + bawah) menggabungkan batas #kolom[...]
+        # tanpa membelah paragraf #pm(62) ke dua segmen kolom terpisah dan melompat ke kolom kanan.
+        p60 = (
+            "Common method bias was assessed using the full collinearity approach proposed earlier. "
+            "All variance inflation factor values remained well below the conservative threshold across constructs. "
+        ) * 3
+        p62 = (
+            "Direct effects were tested through bootstrapping, with results and bias-corrected "
+            "confidence intervals reported in Table 6. All five direct relationships are positive and "
+            "statistically significant, with t-statistics above 1.96 and confidence intervals excluding zero. "
+            "H1 through H5 are supported."
+        )
+        p63 = (
+            "Both indirect effects are positive and significant. Business innovation mediates the effect of "
+            "technological absorptive capacity on business performance and entrepreneurial marketing on "
+            "business performance. "
+        ) * 5
+
+        with tempfile.TemporaryDirectory(dir=BASE, prefix="test-consec-float-") as td:
+            td_p = Path(td)
+            img_path = td_p / "fig.png"
+            from PIL import Image
+            Image.new("RGB", (800, 300), (220, 225, 235)).save(img_path)
+            rel_img = "/" + img_path.relative_to(BASE).as_posix()
+
+            body_dasar = (
+                "#kolom[\n"
+                f"#pm(60);{p60.strip()}#pe(60)\n\n"
+                "#celah()\n"
+                "== #pm(61);Hypothesis Testing#pe(61)\n"
+                f"#pm(62);{p62}#pe(62)\n\n"
+                "]\n"
+                '#tabel(jumlah-kolom: 2, penuh: true, kepala: 1, di-tempat: true, keputusan: "@K7@", label: [Table 6.], isi: [Direct effects])[\n'
+                "#table(\n"
+                "  columns: (120pt, 120pt),\n"
+                "  table.header(table.cell(x: 0, y: 0)[Path], table.cell(x: 1, y: 0)[Result]),\n"
+                "  table.cell(x: 0, y: 1)[H1], table.cell(x: 1, y: 1)[Supported],\n"
+                ")\n"
+                "]\n"
+                "#kolom[\n"
+                "]\n"
+                f'#gambar("{rel_img}", lebar-word: 425.2pt, di-tempat: true, keputusan: "@K8@", label: [Figure 1.], isi: [Structural model])\n'
+                "#kolom[\n"
+                f"#pm(63);{p63.strip()}#pe(63)\n"
+                "]\n"
+            )
+
+            merged = engine.susun_teks(body_dasar, {7: {"jenis": "atas"}, 8: {"jenis": "bawah"}}, akhir_seimbang=True)
+            self.assertEqual(merged.count("#kolom["), 1, merged)
+            self.assertIn('keputusan: "atas", nomor: 7', merged)
+            self.assertIn('keputusan: "bawah", nomor: 8', merged)
+            self.assertNotIn("]\n#tabel(", merged)
+
+            mixed1 = engine.susun_teks(body_dasar, {7: {"jenis": "atas"}, 8: {"jenis": "tempat"}}, akhir_seimbang=True)
+            self.assertEqual(mixed1.count("#kolom["), 2, mixed1)
+            mixed2 = engine.susun_teks(body_dasar, {7: {"jenis": "tempat"}, 8: {"jenis": "bawah"}}, akhir_seimbang=True)
+            self.assertEqual(mixed2.count("#kolom["), 2, mixed2)
+
+            body_typ = td_p / "body.typ"
+            meta_json = td_p / "meta.json"
+            main_typ = td_p / "main.typ"
+            pdf_out = td_p / "out.pdf"
+            body_typ.write_text('#import "/template_jurnal.typ": *\n' + merged, encoding="utf-8")
+            meta_json.write_text(
+                json.dumps({
+                    "judul": "Consecutive Float Merge Test",
+                    "penulis": [{"nama": "Author One", "afiliasi": "1", "korespondensi": True}],
+                    "afiliasi": ["Inst"],
+                    "email": "a@example.com",
+                    "riwayat": {},
+                    "abstrak": "Abstract text.",
+                    "kata_kunci": ["a", "b"],
+                    "sitasi_penulis": "Author, A.",
+                    "judul_kalimat": "Consecutive float merge test",
+                    "header_ganjil": "Author",
+                    "terbitan": {"volume": "5", "nomor": "4", "edisi": "December", "tahun": "2026", "halaman_awal": 726},
+                }),
+                encoding="utf-8",
+            )
+            rel_td = td_p.relative_to(BASE).as_posix()
+            main_typ.write_text(
+                '#import "/template_jurnal.typ": *\n'
+                '#let cfg = json("/jurnal/bsscd/config.json")\n'
+                f'#let meta = json("/{rel_td}/{meta_json.name}")\n'
+                '#show: artikel.with(cfg, meta)\n'
+                f'#include "/{rel_td}/{body_typ.name}"\n',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [engine.TYPST, "compile", "--root", str(BASE), "--font-path", str(BASE / "fonts"), str(main_typ), str(pdf_out)],
+                check=True,
+                capture_output=True,
+            )
+
+            narasi_urut = []
+            with fitz.open(str(pdf_out)) as doc:
+                for pg_idx, pg in enumerate(doc):
+                    col_lines = {0: [], 1: []}
+                    for blk in pg.get_text("dict").get("blocks", []):
+                        for ln in blk.get("lines", []):
+                            txt = "".join(s.get("text", "") for s in ln.get("spans", [])).strip()
+                            if not txt or not ln.get("spans"):
+                                continue
+                            if abs(float(ln["spans"][0]["size"]) - 11.0) > 0.2:
+                                continue
+                            y = float(ln["spans"][0]["origin"][1])
+                            if y <= 102.4 or (pg_idx == 0 and y < 380.0):
+                                continue
+                            col = 0 if ln["bbox"][0] < 295.0 else 1
+                            col_lines[col].append((y, txt))
+                    for col in (0, 1):
+                        col_lines[col].sort(key=lambda item: item[0])
+                        narasi_urut.extend(t for _, t in col_lines[col])
+
+            joined = " ".join(narasi_urut)
+            idx_direct = joined.find("Direct effects were tested")
+            idx_conf = joined.find("confidence intervals reported in Table 6")
+            idx_h1h5 = joined.find("H1 through H5 are supported")
+            idx_indirect = joined.find("Both indirect effects are positive and significant")
+            self.assertNotIn(-1, (idx_direct, idx_conf, idx_h1h5, idx_indirect), joined)
+            self.assertLess(idx_direct, idx_conf)
+            self.assertLess(idx_conf, idx_h1h5)
+            self.assertLess(idx_h1h5, idx_indirect)
+
+    def test_pindah_pita_atas_tabel_belah_par_preserves_reading_order_and_guards_bounds(self):
+        body_A = (
+            "#kolom[\n"
+            "#pm(1);Direct effects were tested through bootstrapping, with results and bias-corrected "
+            "confidence intervals reported in Table 6. All five direct relationships are positive and "
+            "H1 through H5 are supported.#pe(1)\n\n"
+            "#pm(2);Both indirect effects are positive and significant.#pe(2)\n\n"
+            "]\n"
+            '#tabel(keputusan: "@K1@", penuh: true)[\n'
+            "  #table(columns: 2, [A], [B])\n"
+            "]\n"
+            "#kolom[\n"
+            "#pm(3);Paragraph after table.#pe(3)\n"
+            "]\n"
+        )
+        res_A = engine.pindah_pita_atas_tabel(
+            body_A, 1, "belah_par", 1, "confidence intervals reported in Table 6"
+        )
+        i_bag1 = res_A.find("Direct effects were tested")
+        i_tbl = res_A.find("#tabel(")
+        i_bag2 = res_A.find("#lanjutan[#pf(1, 1);confidence intervals reported in Table 6")
+        i_pm2 = res_A.find("#pm(2);Both indirect effects")
+        i_pm3 = res_A.find("#pm(3);Paragraph after table.")
+        self.assertNotIn(-1, (i_bag1, i_tbl, i_bag2, i_pm2, i_pm3), res_A)
+        self.assertLess(i_bag1, i_tbl)
+        self.assertLess(i_tbl, i_bag2)
+        self.assertLess(i_bag2, i_pm2)
+        self.assertLess(i_pm2, i_pm3)
+
+        # Kasus B: paragraf #pm(3) berada SESUDAH Tabel 1 -> tidak boleh dipindah ke sebelum #pm(3)
+        res_B = engine.pindah_pita_atas_tabel(
+            body_A.replace("#pm(3);Paragraph after table.#pe(3)", "#pm(3);Paragraph after table continues nicely across words.#pe(3)"),
+            1,
+            "belah_par",
+            3,
+            "after table continues nicely",
+        )
+        self.assertEqual(
+            res_B,
+            body_A.replace("#pm(3);Paragraph after table.#pe(3)", "#pm(3);Paragraph after table continues nicely across words.#pe(3)"),
+        )
+
+    def test_belah_paragraf_rejects_paragraph_already_modified_by_tarik_kata(self):
+        p1 = ("First paragraph sentence with sufficient words for test coverage here. " * 4).strip()
+        p2 = ("Second paragraph follows with plenty of narrative words so subtracting a few words never creates a widow anywhere. " * 3).strip()
+        body_raw = f"#kolom[\n#pm(1);{p1}#pe(1)\n\n#pm(2);{p2}#pe(2)\n]\n"
+        stolen = engine.tarik_kata_paragraf(body_raw, 1, 2, 4)
+        self.assertIsNotNone(stolen)
+        self.assertIsNone(engine.potong_paragraf(stolen, 1, "words for test coverage"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

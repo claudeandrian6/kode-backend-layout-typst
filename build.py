@@ -2562,22 +2562,48 @@ def _tutup_kolom_sebelum(teks, p):
 
 def gabung_kolom_apung(teks, keputusan):
     """FIX-APUNG-GABUNG: objek selebar halaman yang mengapung tidak perlu memutus kolom.
-    Pola ']\n<objek>...\n#kolom[\n' digabung sehingga float dipicu dari dalam kolom dan
-    teks mengalir tanpa celah; objek tetap naik ke atas halaman berikut."""
-    for k, v in keputusan.items():
-        if v != "apung":
-            continue
-        i = teks.find('"@K{}@"'.format(k))
-        if i < 0:
-            continue
-        p = teks.rfind("\n", 0, i) + 1                      # awal baris objek
-        q = teks.find("\n#kolom[\n", i)                    # pembuka segmen sesudahnya
-        if not _tutup_kolom_sebelum(teks, p) or q < 0:
-            continue                                          # objek satu kolom: tak diputus
-        lain = teks.find('"@K', i + 3)
-        if lain != -1 and lain < q:
-            continue
-        teks = teks[:p - 2] + teks[p:q + 1] + teks[q + len("\n#kolom[\n"):]
+    Pola ']\\n<objek-apung>+\\n#kolom[\\n' digabung sehingga float dipicu dari dalam kolom dan
+    teks mengalir utuh tanpa menumpuk dua segmen #kolom[...] pada halaman yang sama."""
+    apung_keys = {k for k, v in keputusan.items() if v == "apung"}
+    if not apung_keys:
+        return teks
+    while True:
+        digabung = False
+        for k in sorted(apung_keys):
+            i = teks.find('"@K{}@"'.format(k))
+            if i < 0:
+                continue
+            p = teks.rfind("\n", 0, i) + 1                      # awal baris objek
+            if not _tutup_kolom_sebelum(teks, p):
+                continue                                         # objek satu kolom / bukan awal celah
+            cur = p
+            jumlah_obj = 0
+            ketemu_kolom = False
+            while cur < len(teks):
+                while cur < len(teks) and teks[cur] == "\n":
+                    cur += 1
+                if teks.startswith("#kolom[\n", cur):
+                    ketemu_kolom = jumlah_obj > 0
+                    break
+                eol = teks.find("\n", cur)
+                baris = teks[cur:len(teks) if eol < 0 else eol]
+                mk = re.search(r'"@K(\d+)@"', baris)
+                if not mk:
+                    break
+                obj_k = int(mk.group(1))
+                if obj_k not in apung_keys:
+                    break
+                p_o, q_o = blok_objek(teks, obj_k)
+                if p_o != cur or q_o <= cur:
+                    break
+                cur = q_o
+                jumlah_obj += 1
+            if ketemu_kolom:
+                teks = teks[:p - 2] + teks[p:cur] + teks[cur + len("#kolom[\n"):]
+                digabung = True
+                break
+        if not digabung:
+            break
     return teks
 
 
@@ -2935,6 +2961,25 @@ def susun_teks(body_dasar, keputusan, hapus=None, akhir_seimbang=False):
             continue
         t = _mundur_sebelum_judul(teks, teks.rfind("\n", 0, t) + 1)
         teks = teks[:t] + objek + "\n" + teks[t:]
+    # FIX-APUNG-BERURUTAN: gabungkan semua segmen #kolom[...] yang hanya dipisahkan
+    # oleh satu atau lebih objek apung (atas/bawah/tunda) sebelum placeholder @K..@ diganti,
+    # agar dua blok #kolom[...] tidak menumpuk pada halaman yang sama dan memecah aliran teks.
+    apung_semua = {
+        k: "apung" for k, kp in keputusan.items()
+        if kp["jenis"] in ("atas", "bawah", "tunda") and k != hapus
+    }
+    if apung_semua:
+        teks = gabung_kolom_apung(teks, apung_semua)
+    while True:
+        m_gab = None
+        for m_k in re.finditer(r"\]\n\s*#kolom\[\n", teks):
+            if _tutup_kolom_sebelum(teks, m_k.start() + 2):
+                m_gab = m_k
+                break
+        if m_gab is None:
+            break
+        sep = "" if teks[:m_gab.start()].endswith("\n\n") else "\n"
+        teks = teks[:m_gab.start()] + sep + teks[m_gab.end():]
     for k in sorted(keputusan):
         kp = keputusan[k]
         if kp["jenis"] == "lanjut" and k != hapus:
@@ -2942,8 +2987,6 @@ def susun_teks(body_dasar, keputusan, hapus=None, akhir_seimbang=False):
             s = teks.rfind("#kolom[", 0, p)
             if s >= 0:
                 teks = teks[:s] + "#kolom-lanjut[" + teks[s + len("#kolom["):]
-        if kp["jenis"] in ("atas", "bawah") and k != hapus:          # FIX-PITA-SUSUN
-            teks = gabung_kolom_apung(teks, {k: "apung"})
         if kp["jenis"] == "tunda":
             # FIX-TUNDA-BAWAH: gambar satu kolom yang ditunda (atau objek tunda dengan letak="bawah"
             # untuk memecah tumpukan 3 objek berurutan) diletakkan di dasar halaman/kolom.
@@ -4631,6 +4674,8 @@ def _belah_paragraf(t, n, teks_baris):
             return None
         akhir -= 1
     isi = t[awal:akhir]
+    if "#linebreak(justify: true)" in isi:
+        return None
     # peta karakter alfanumerik terlihat -> indeks sumber
     peta, alnum, k = [], [], 0
     while k < len(isi):
@@ -4715,15 +4760,43 @@ def cari_pita_atas_tabel(pdf, pos, hal, k, teks, y_mulai=100.0):
         return None
     y0, potongan0 = sorted(per_y.items())[0]
     teks_l = " ".join(t for _, t in sorted(potongan0))
+    seg_teks = teks
+    p_k = -1
+    if teks and '"@K{}@"'.format(k) in teks:
+        p_k, _ = blok_objek(teks, k)
+    elif teks:
+        m_tk = re.search(r"#tabel\([^\n]*\bnomor:\s*{}\b".format(k), teks)
+        if m_tk:
+            p_k = teks.rfind("\n", 0, m_tk.start()) + 1
+    if p_k >= 0 and _tutup_kolom_sebelum(teks, p_k):
+        seg_open = teks.rfind("#kolom", 0, p_k - 2)
+        seg_body = (teks.find("\n", seg_open) + 1) if seg_open >= 0 else 0
+        seg_teks = teks[seg_body:p_k - 2]
     for kk, v in pos.items():
         if kk.startswith("pm-") and v[1] == hal and v[2] < 300 and abs((v[3] + 8.8) - y0) <= 1.5:
-            return ("putus_par", int(kk[3:]), "")
+            n_cand = int(kk[3:])
+            if teks and not re.search(r"#pm\({}\);".format(n_cand), seg_teks):
+                continue
+            return ("putus_par", n_cand, "")
     semua_pm = sorted((v[1], 0 if v[2] < 300 else 1, v[3], int(kk[3:]))
                       for kk, v in pos.items() if kk.startswith("pm-"))
-    sebelum = [u for u in semua_pm if u[0] < hal or (u[0] == hal and u[1] == 0 and u[2] < y0)]
+    sebelum = [
+        u for u in semua_pm
+        if u[0] < hal
+        or (u[0] == hal and (
+            (u[1] == 0 and u[2] < y0)
+            or (y_mulai > 100.5 and u[1] == 1 and u[2] < y_mulai)
+        ))
+    ]
     if not sebelum:
         return None
-    return ("belah_par", sebelum[-1][3], teks_l)
+    n_cand = sebelum[-1][3]
+    if teks:
+        if "#pf({},".format(n_cand) in teks:
+            return None
+        if not re.search(r"#pm\({}\);".format(n_cand), seg_teks):
+            return None
+    return ("belah_par", n_cand, teks_l)
 
 
 def pindah_pita_atas_tabel(teks, k, mode, n_pm, teks_baris=""):
@@ -4733,33 +4806,44 @@ def pindah_pita_atas_tabel(teks, k, mode, n_pm, teks_baris=""):
     p, q = blok_objek(teks, k)
     if not _tutup_kolom_sebelum(teks, p) or not teks.startswith("#kolom[\n", q):
         return teks
+    seg_open = teks.rfind("#kolom", 0, p - 2)
+    seg_body = (teks.find("\n", seg_open) + 1) if seg_open >= 0 else 0
     if mode == "putus_par":
-        m = re.search(r"^#pm\({}\);".format(n_pm), teks[:p - 2], flags=re.M)
+        m = re.search(
+            r"^(?:=+\s+|#(?:referensi|wawancara)\[|#(?:label-gantung|butir)\([^\n]*\)\[)?#pm\({}\);".format(n_pm),
+            teks[seg_body:p - 2],
+            flags=re.M,
+        )
         if not m:
             return teks
-        potongan = teks[m.start():p - 2].strip()
-        sebelum = teks[:m.start()].rstrip() + "\n"
+        mulai_pos = max(seg_body, _mundur_sebelum_judul(teks, seg_body + m.start()))
+        potongan = teks[mulai_pos:p - 2].strip()
+        sebelum = teks[:mulai_pos].rstrip() + "\n"
         sisip = q + len("#kolom[\n")
         return sebelum + teks[p - 2:sisip] + potongan + "\n\n" + teks[sisip:]
     r = _belah_paragraf(teks, n_pm, teks_baris)
     if not r or r[4] or "#pf({},".format(n_pm) in teks:
         return teks
     awal, akhir, bag1, bag2, _ = r
+    if awal < seg_body or akhir > p - 2:
+        return teks
+    ekor_raw = teks[akhir:p - 2]
+    if any(tok in ekor_raw for tok in ("#kolom", "#tabel(", "#gambar(")):
+        return teks
     bag1 = bag1.removesuffix("#linebreak()") + "#pe({})#linebreak(justify: true)".format(n_pm)
     bag2 = "#pf({}, 1);".format(n_pm) + bag2.replace("#pe({})".format(n_pm),
                                                      "#pe({}, bagian: 1)".format(n_pm))
-    sementara = teks[:awal] + bag1 + teks[akhir:]
-    p2, q2 = blok_objek(sementara, k)
-    if not _tutup_kolom_sebelum(sementara, p2) or not sementara.startswith("#kolom[\n", q2):
-        return teks
-    sisip = q2 + len("#kolom[\n")
-    depan, belakang = sementara[:p2 - 2], sementara[sisip:]
-    m_celah = re.search(r"\n+#celah\(\)\n*$", depan)
-    if m_celah:
-        depan = depan[:m_celah.start()] + "\n"
+    sisip = q + len("#kolom[\n")
+    tengah = teks[p - 2:sisip]
+    belakang = teks[sisip:]
+    depan = teks[:awal] + bag1 + "\n"
+    if re.fullmatch(r"\s*#celah\(\)\s*", ekor_raw):
         if re.match(r"\s*=", belakang):
             belakang = "#celah()\n" + belakang.lstrip("\n")
-    return depan + sementara[p2 - 2:sisip] + "#lanjutan[" + bag2 + "]\n\n" + belakang
+        return depan + tengah + "#lanjutan[" + bag2 + "]\n\n" + belakang
+    ekor = ekor_raw.strip()
+    tambahan_ekor = (ekor + "\n\n") if ekor else ""
+    return depan + tengah + "#lanjutan[" + bag2 + "]\n\n" + tambahan_ekor + belakang
 
 
 def potong_paragraf(t, n, teks_baris):
